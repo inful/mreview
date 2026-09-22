@@ -39,17 +39,16 @@ func (r *Reviewer) postSummary(ctx context.Context, project string, iid int, bod
 // Line-out-of-range errors from GitLab surface as KindConflict
 // (gitlab classifier promotes 400-with-line-range-error); the
 // finding is dropped with a Reason, not retried.
-func (r *Reviewer) postFinding(ctx context.Context, project string, iid int, refs gitlab.DiffRefs, f llm.Finding) PostedFinding {
+//
+// `meta` carries the file's diff metadata (new / modified /
+// deleted / renamed, plus old_path when renamed). The GitLab
+// /discussions endpoint requires different position shapes
+// depending on file status — see buildInlineComment for the
+// per-case rules.
+func (r *Reviewer) postFinding(ctx context.Context, project string, iid int, refs gitlab.DiffRefs, meta gitlab.ChangeFile, f llm.Finding) PostedFinding {
 	pf := PostedFinding{Finding: f}
 
-	cmt := gitlab.InlineComment{
-		File:       f.File,
-		OldPath:    "", // set only for modifications/renames; future enhancement
-		NewLine:    f.Line,
-		OldLine:    0,
-		Body:       f.Body,
-		Suggestion: f.Suggestion,
-	}
+	cmt := buildInlineComment(meta, f)
 
 	if r.cfg.DryRun {
 		r.cfg.Logger.Info("dry-run: would post inline comment",
@@ -138,4 +137,53 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n] + "..."
+}
+
+// buildInlineComment constructs the InlineComment for one finding,
+// choosing the right combination of NewPath / OldPath / NewLine /
+// OldLine for the file's diff status. The GitLab /discussions
+// endpoint is strict about which fields are sent:
+//
+//   - New file (NewFile=true): send NewPath + NewLine only. Per
+//     the API docs: "To create a thread on an added line, use
+//     position[new_line] and don't include position[old_line]."
+//     OldPath/OldLine are not omitted by sending "" or 0 — the
+//     internal diff-line lookup treats those as "anchor to old
+//     line 0", which doesn't exist, and returns 500.
+//
+//   - Deleted file (DeletedFile=true): send OldPath + OldLine
+//     only. There's no new side of the diff to anchor against.
+//
+//   - Modified or renamed: send NewPath + NewLine (and OldPath
+//     only when the rename changed the path — meta.OldPath !=
+//     meta.NewPath).
+//
+// `meta` may be the zero ChangeFile if the finding's file path
+// isn't in the diff (shouldn't happen post-filter, but defensive).
+// In that case we fall back to the "modified" branch with just
+// NewPath + NewLine, which is the most lenient shape.
+func buildInlineComment(meta gitlab.ChangeFile, f llm.Finding) gitlab.InlineComment {
+	cmt := gitlab.InlineComment{
+		File:       f.File,
+		Body:       f.Body,
+		Suggestion: f.Suggestion,
+	}
+
+	switch {
+	case meta.NewFile:
+		cmt.NewLine = f.Line
+		// OldPath and OldLine left zero; PostDiscussion omits them.
+	case meta.DeletedFile:
+		cmt.OldPath = meta.OldPath
+		cmt.OldLine = f.Line
+		// NewLine and File's "new side" left zero; PostDiscussion omits.
+	default:
+		cmt.NewLine = f.Line
+		if meta.OldPath != "" && meta.OldPath != meta.NewPath {
+			// Renamed file: include the old path so the comment
+			// anchors to the rename boundary.
+			cmt.OldPath = meta.OldPath
+		}
+	}
+	return cmt
 }
