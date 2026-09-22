@@ -32,6 +32,7 @@ https://gitlab.example.com/group/project/-/merge_requests/42
 - [GitLab webhook setup (for `serve`)](#gitlab-webhook-setup-for-serve)
 - [Configuration](#configuration)
 - [Customizing the prompts](#customizing-the-prompts)
+- [LLM presets](#llm-presets)
 - [Architecture](#architecture)
 - [Performance & cost](#performance--cost)
 - [Examples](#examples)
@@ -399,6 +400,48 @@ server:
   addr: ":8080"
   webhook_secret_env: GITLAB_WEBHOOK_SECRET
   queue_size: 32
+```
+
+### LLM presets
+
+When you run mreview against multiple LLM backends with different
+context windows, declaring each model's `context_window` once lets
+mreview auto-derive the right packing budget per invocation. The
+operator writes the YAML once; the `--model` flag selects the preset.
+
+```yaml
+llm_presets:
+  opus-local:
+    context_window: 168000
+    per_chunk_timeout: 15m
+  gemma-26b-e4b:
+    context_window: 80000
+    per_chunk_timeout: 5m
+
+llm_preset_by_model:
+  "qwen2.5-coder:7b": opus-local
+  "gemma-26b-e4b":    gemma-26b-e4b
+```
+
+When `--model=qwen2.5-coder:7b` matches, mreview derives
+`--max-batch-bytes ≈ 520 KB` from the 168k window and uses the
+15-minute timeout — no per-invocation flag wrangling. Lookup is
+strict (exact match); unknown models get no preset and packing
+falls back to disabled (one LLM call per file).
+
+The byte budget is derived as:
+
+```
+max_batch_bytes = (context_window - 1500 - max_tokens - 15% safety) × 4 bytes/token
+```
+
+CLI flags (`--max-batch-bytes`, `--per-chunk-timeout`) always win
+when set; the preset fills in the gaps. When a preset applies,
+you'll see log lines like:
+
+```
+INFO LLM preset applied preset=opus-local model=qwen2.5-coder:7b context_window=168000
+INFO max_batch_bytes derived from preset preset=opus-local context_window=168000 max_tokens=8192 max_batch_bytes=532432
 ```
 
 ## Customizing the prompts

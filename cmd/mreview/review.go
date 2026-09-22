@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/inful/mreview/internal/config"
 	"github.com/inful/mreview/internal/gitlab"
 	"github.com/inful/mreview/internal/llm"
 	"github.com/inful/mreview/internal/reviewer"
@@ -39,10 +40,10 @@ type ReviewCmd struct {
 
 	// MaxBatchBytes is the byte budget for packing multiple
 	// chunks into a single LLM call. 0 = one chunk per call
-	// (default; one LLM call per file). Operators with large-
-	// context models should raise this — see README for the
-	// derivation formula from the model's context window.
-	MaxBatchBytes int `name:"max-batch-bytes" env:"MREVIEW_MAX_BATCH_BYTES" help:"Byte budget for packing multiple chunks into one LLM call. 0 (default) = one chunk per call. Raise for large-context models; the reduce of LLM calls can be significant on MRs with many small files."`
+	// (default). Operators with large-context models should
+	// raise this; a preset layer can also compute it from the
+	// model's declared context window.
+	MaxBatchBytes int `name:"max-batch-bytes" env:"MREVIEW_MAX_BATCH_BYTES" help:"Byte budget for packing multiple chunks into one LLM call. 0 (default) = one chunk per call. Raise for large-context models."`
 
 	// Per-call timeout.
 	PerChunkTimeout time.Duration `default:"120s" name:"per-chunk-timeout" env:"MREVIEW_PER_CHUNK_TIMEOUT" help:"Per-LLM-call timeout."`
@@ -82,7 +83,7 @@ type ReviewCmd struct {
 // runReview is invoked by run() after CLI parsing matches the
 // "review" subcommand. It wires up the GitLab + LLM clients and
 // delegates to internal/reviewer.
-func runReview(stdout io.Writer, c *ReviewCmd, logger *slog.Logger) error {
+func runReview(stdout io.Writer, c *ReviewCmd, cfg *config.File, logger *slog.Logger) error {
 	logger.Info("starting review",
 		"repo", c.Repo,
 		"mr", c.MR,
@@ -123,6 +124,11 @@ func runReview(stdout io.Writer, c *ReviewCmd, logger *slog.Logger) error {
 	if err != nil {
 		return logWithError(logger, ExitConfig, "load user prompt file", err)
 	}
+
+	// Apply LLM preset (CLI flags take precedence).
+	c.MaxBatchBytes, c.PerChunkTimeout = resolveLLMSettings(
+		cfg, c.Model, c.MaxBatchBytes, c.PerChunkTimeout, c.MaxTokens, logger,
+	)
 
 	rev, err := reviewer.NewReviewer(reviewer.Config{
 		GitLab:             glClient,

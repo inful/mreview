@@ -239,3 +239,192 @@ func TestSampleYAMLDurationsParse(t *testing.T) {
 		}
 	}
 }
+
+// TestDeriveMaxBatchBytes covers the derivation formula across
+// realistic model classes plus the infeasibility edge cases.
+func TestDeriveMaxBatchBytes(t *testing.T) {
+	cases := []struct {
+		name          string
+		contextWindow int
+		maxTokens     int
+		wantMin       int // inclusive lower bound (derivation is approximate)
+		wantMax       int // inclusive upper bound
+	}{
+		{
+			name:          "opus-local: 168k window, 8192 output",
+			contextWindow: 168000,
+			maxTokens:     8192,
+			wantMin:       520000,
+			wantMax:       545000,
+		},
+		{
+			name:          "gemma-26b-e4b: 80k window, 8192 output",
+			contextWindow: 80000,
+			maxTokens:     8192,
+			wantMin:       225000,
+			wantMax:       240000,
+		},
+		{
+			name:          "small model: 8k window, 2048 output",
+			contextWindow: 8000,
+			maxTokens:     2048,
+			wantMin:       12000,
+			wantMax:       14000,
+		},
+		{
+			name:          "feasibility floor: context < overhead+output+safety",
+			contextWindow: 4000,
+			maxTokens:     2048,
+			wantMin:       0,
+			wantMax:       0,
+		},
+		{
+			name:          "zero context",
+			contextWindow: 0,
+			maxTokens:     8192,
+			wantMin:       0,
+			wantMax:       0,
+		},
+		{
+			name:          "negative context",
+			contextWindow: -1,
+			maxTokens:     8192,
+			wantMin:       0,
+			wantMax:       0,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := DeriveMaxBatchBytes(tc.contextWindow, tc.maxTokens)
+			if got < tc.wantMin || got > tc.wantMax {
+				t.Errorf("DeriveMaxBatchBytes(%d, %d) = %d; want in [%d, %d]",
+					tc.contextWindow, tc.maxTokens, got, tc.wantMin, tc.wantMax)
+			}
+		})
+	}
+}
+
+// TestApplyPreset_Hit verifies the happy path: model name is
+// mapped to a preset, preset exists, values are returned.
+func TestApplyPreset_Hit(t *testing.T) {
+	yaml := `
+llm_presets:
+  opus-local:
+    context_window: 168000
+    per_chunk_timeout: 15m
+  gemma-26b-e4b:
+    context_window: 80000
+    per_chunk_timeout: 5m
+
+llm_preset_by_model:
+  "qwen2.5-coder:7b": opus-local
+  "gemma-26b-e4b":    gemma-26b-e4b
+`
+	f, err := Parse([]byte(yaml))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+
+	name, p, ok := f.ApplyPreset("gemma-26b-e4b")
+	if !ok {
+		t.Fatal("expected preset match for gemma-26b-e4b")
+	}
+	if name != "gemma-26b-e4b" {
+		t.Errorf("name = %q, want gemma-26b-e4b", name)
+	}
+	if p.ContextWindow != 80000 {
+		t.Errorf("ContextWindow = %d, want 80000", p.ContextWindow)
+	}
+	if p.PerChunkTimeout != "5m" {
+		t.Errorf("PerChunkTimeout = %q, want 5m", p.PerChunkTimeout)
+	}
+}
+
+// TestApplyPreset_Miss verifies that an unknown model returns ok=false
+// without panicking — caller is expected to fall back to defaults
+// and log a warning.
+func TestApplyPreset_Miss(t *testing.T) {
+	yaml := `
+llm_presets:
+  opus-local:
+    context_window: 168000
+
+llm_preset_by_model:
+  "qwen2.5-coder:7b": opus-local
+`
+	f, err := Parse([]byte(yaml))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+
+	_, _, ok := f.ApplyPreset("unknown-model")
+	if ok {
+		t.Error("expected no match for unknown-model")
+	}
+}
+
+// TestApplyPreset_NoConfig verifies that a config without presets
+// returns ok=false (so callers default gracefully).
+func TestApplyPreset_NoConfig(t *testing.T) {
+	f, err := Parse([]byte(`gitlab: { url: x, token_env: T }`))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	_, _, ok := f.ApplyPreset("anything")
+	if ok {
+		t.Error("expected no match when config has no presets")
+	}
+}
+
+// TestApplyPreset_DanglingReference verifies the misconfiguration
+// case: model → preset name, but no preset with that name. The
+// function returns ok=false but preserves the name so the caller
+// can log it loudly.
+func TestApplyPreset_DanglingReference(t *testing.T) {
+	yaml := `
+llm_presets:
+  opus-local:
+    context_window: 168000
+
+llm_preset_by_model:
+  "qwen2.5-coder:7b": nonexistent-preset
+`
+	f, err := Parse([]byte(yaml))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+
+	name, _, ok := f.ApplyPreset("qwen2.5-coder:7b")
+	if ok {
+		t.Error("expected no match for dangling preset reference")
+	}
+	if name != "nonexistent-preset" {
+		t.Errorf("dangling name should be returned for logging, got %q", name)
+	}
+}
+
+// TestParsePresetTimeout confirms the helper handles empty,
+// valid, and invalid duration strings consistently.
+func TestParsePresetTimeout(t *testing.T) {
+	cases := []struct {
+		in        string
+		want      time.Duration
+		wantValid bool
+	}{
+		{"", 15 * time.Minute, false},
+		{"5m", 5 * time.Minute, true},
+		{"30s", 30 * time.Second, true},
+		{"garbage", 15 * time.Minute, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.in, func(t *testing.T) {
+			got, valid := ParsePresetTimeout(tc.in)
+			if got != tc.want {
+				t.Errorf("ParsePresetTimeout(%q) = %v; want %v", tc.in, got, tc.want)
+			}
+			if valid != tc.wantValid {
+				t.Errorf("ParsePresetTimeout(%q) valid = %v; want %v", tc.in, valid, tc.wantValid)
+			}
+		})
+	}
+}

@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/inful/mreview/internal/config"
 	"github.com/inful/mreview/internal/gitlab"
 	"github.com/inful/mreview/internal/llm"
 	"github.com/inful/mreview/internal/reviewer"
@@ -61,7 +62,7 @@ type ServeCmd struct {
 // "serve" subcommand. It builds the same GitLab + LLM clients as
 // review, wires a worker pool that runs the reviewer per webhook,
 // and blocks until parentCtx is canceled.
-func runServe(parentCtx context.Context, stdout io.Writer, c *ServeCmd, logger *slog.Logger) error {
+func runServe(parentCtx context.Context, stdout io.Writer, c *ServeCmd, cfg *config.File, logger *slog.Logger) error {
 	logger.Info("serve: starting",
 		"addr", c.Addr,
 		"model", c.Model,
@@ -101,6 +102,11 @@ func runServe(parentCtx context.Context, stdout io.Writer, c *ServeCmd, logger *
 	if err != nil {
 		return logWithError(logger, ExitConfig, "load user prompt file", err)
 	}
+
+	// Apply LLM preset (CLI flags take precedence).
+	c.MaxBatchBytes, c.PerChunkTimeout = resolveLLMSettings(
+		cfg, c.Model, c.MaxBatchBytes, c.PerChunkTimeout, c.MaxTokens, logger,
+	)
 
 	rev, err := reviewer.NewReviewer(reviewer.Config{
 		GitLab:             glClient,

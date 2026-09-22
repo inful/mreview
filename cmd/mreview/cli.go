@@ -2,9 +2,13 @@ package main
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
+
+	"github.com/inful/mreview/internal/config"
 )
 
 // Exit codes documented in README.md. Stable; CI scripts may depend on them.
@@ -131,3 +135,80 @@ func (e *ExitError) Error() string {
 
 // Unwrap allows errors.Is / errors.As to reach the wrapped cause.
 func (e *ExitError) Unwrap() error { return e.Wrapped }
+
+// resolveLLMSettings applies the LLM preset for model. CLI values
+// take precedence; preset values fill in when CLI values are unset.
+//
+// Returns the effective (maxBatchBytes, perChunkTimeout). When no
+// preset matches the model, the CLI values pass through unchanged.
+// Logs at Info when a preset fires (or when a CLI flag overrides
+// the preset's derived value) and at Warn when the preset is
+// dangling or the derivation is infeasible.
+func resolveLLMSettings(
+	cfg *config.File,
+	model string,
+	cliMaxBatchBytes int,
+	cliPerChunkTimeout time.Duration,
+	maxTokens int,
+	logger *slog.Logger,
+) (int, time.Duration) {
+	maxBatchBytes := cliMaxBatchBytes
+	perChunkTimeout := cliPerChunkTimeout
+
+	presetName, preset, ok := cfg.ApplyPreset(model)
+	if !ok {
+		// presetName is non-empty when the model mapped to a name
+		// that has no matching preset definition — log loudly so
+		// the operator notices the misconfiguration.
+		if presetName != "" {
+			logger.Warn("LLM preset references unknown name; ignoring",
+				"model", model,
+				"preset", presetName,
+			)
+		}
+		return maxBatchBytes, perChunkTimeout
+	}
+
+	logger.Info("LLM preset applied",
+		"preset", presetName,
+		"model", model,
+		"context_window", preset.ContextWindow,
+	)
+
+	if maxBatchBytes == 0 {
+		derived := config.DeriveMaxBatchBytes(preset.ContextWindow, maxTokens)
+		if derived > 0 {
+			maxBatchBytes = derived
+			logger.Info("max_batch_bytes derived from preset",
+				"preset", presetName,
+				"context_window", preset.ContextWindow,
+				"max_tokens", maxTokens,
+				"max_batch_bytes", derived,
+			)
+		} else {
+			logger.Warn("max_batch_bytes derivation infeasible; packing disabled",
+				"preset", presetName,
+				"context_window", preset.ContextWindow,
+				"max_tokens", maxTokens,
+			)
+		}
+	} else {
+		logger.Info("max_batch_bytes override (CLI flag wins over preset)",
+			"preset", presetName,
+			"cli_value", maxBatchBytes,
+			"derived_value", config.DeriveMaxBatchBytes(preset.ContextWindow, maxTokens),
+		)
+	}
+
+	if perChunkTimeout == 0 {
+		if d, valid := config.ParsePresetTimeout(preset.PerChunkTimeout); valid {
+			perChunkTimeout = d
+			logger.Info("per_chunk_timeout from preset",
+				"preset", presetName,
+				"per_chunk_timeout", d,
+			)
+		}
+	}
+
+	return maxBatchBytes, perChunkTimeout
+}
