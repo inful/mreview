@@ -8,7 +8,48 @@ After v0.1.0, entries are generated from conventional commits by
 GoReleaser. The hand-written entries below document the initial
 release.
 
-## [Unreleased]
+## [0.2.0]
+
+### Fixed
+
+- **Reviews now post inline comments instead of silently dropping them** (#15).
+  The previous system prompt instructed the LLM to emit an empty
+  `findings` array on "clean" diffs, which a 7B coder model took as
+  permission to skip findings entirely — the resulting MR had a
+  summary note but no inline comments even when the LLM had clearly
+  identified real issues in the summary prose. The prompt now
+  requires at least one finding per substantive diff; severity
+  `info` is the acceptable escape hatch for genuinely clean diffs.
+  Pair with a WARN log when zero findings come back on a diff
+  larger than 10 lines, so the regression is impossible to miss.
+- **Dropped chunks are now identifiable in logs** (#16). The
+  `chunk review failed` WARN line previously carried only the error
+  message — no batch index, no file paths. Now it carries
+  `batch=<n> files=<csv>` so operators can identify which file was
+  lost in a multi-chunk MR without re-reading every prompt.
+
+### Added
+
+- **Chunk packing for large-context models** (#18). New
+  `--max-batch-bytes` flag and `BatchChunksWithLimit` packer
+  greedily group consecutive chunks whose combined size fits the
+  budget. A 30-file MR against an Opus-tier 168k-context model
+  collapses from 30 LLM calls to 1-3. Default is `0` (one call per
+  chunk) so existing users see no change.
+- **LLM presets in YAML config** (#20). New `llm_presets:` and
+  `llm_preset_by_model:` blocks let operators declare each model's
+  `context_window` once and have mreview auto-derive the packing
+  budget (`max_batch_bytes = (context_window - 1500 - max_tokens
+  - 15% safety) × 4`). CLI flags always override preset values;
+  every decision is logged.
+
+### Refactored
+
+- **Split `internal/gitlab/comments.go`** (#13) into four files
+  by responsibility: `types.go` (Note, Discussion, InlineComment +
+  projections), `post_summary.go`, `post_discussion.go`,
+  `validate.go`. Largest non-test file in the package dropped from
+  369 LOC to 191 LOC. No behaviour change.
 
 ## [0.1.0] — initial release
 
@@ -132,5 +173,6 @@ The AGPL network clause applies: anyone running a modified
 mreview as a service that others interact with over a network
 must provide the source of their modifications to those users.
 
-[Unreleased]: https://github.com/inful/mreview/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/inful/mreview/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/inful/mreview/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/inful/mreview/releases/tag/v0.1.0
