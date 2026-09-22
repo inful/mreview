@@ -139,21 +139,23 @@ func (e *ExitError) Unwrap() error { return e.Wrapped }
 // resolveLLMSettings applies the LLM preset for model. CLI values
 // take precedence; preset values fill in when CLI values are unset.
 //
-// Returns the effective (maxBatchBytes, perChunkTimeout). When no
-// preset matches the model, the CLI values pass through unchanged.
-// Logs at Info when a preset fires (or when a CLI flag overrides
-// the preset's derived value) and at Warn when the preset is
-// dangling or the derivation is infeasible.
+// Returns the effective (maxBatchBytes, perChunkTimeout,
+// reasoningEffort). When no preset matches the model, the CLI
+// values pass through unchanged. Logs at Info when a preset fires
+// (or when a CLI flag overrides the preset's derived value) and
+// at Warn when the preset is dangling or the derivation is infeasible.
 func resolveLLMSettings(
 	cfg *config.File,
 	model string,
 	cliMaxBatchBytes int,
 	cliPerChunkTimeout time.Duration,
+	cliReasoningEffort string,
 	maxTokens int,
 	logger *slog.Logger,
-) (int, time.Duration) {
+) (int, time.Duration, string) {
 	maxBatchBytes := cliMaxBatchBytes
 	perChunkTimeout := cliPerChunkTimeout
+	reasoningEffort := cliReasoningEffort
 
 	presetName, preset, ok := cfg.ApplyPreset(model)
 	if !ok {
@@ -166,7 +168,7 @@ func resolveLLMSettings(
 				"preset", presetName,
 			)
 		}
-		return maxBatchBytes, perChunkTimeout
+		return maxBatchBytes, perChunkTimeout, reasoningEffort
 	}
 
 	logger.Info("LLM preset applied",
@@ -210,5 +212,13 @@ func resolveLLMSettings(
 		}
 	}
 
-	return maxBatchBytes, perChunkTimeout
+	if reasoningEffort == "" && preset.ReasoningEffort != "" {
+		reasoningEffort = preset.ReasoningEffort
+		logger.Info("reasoning_effort from preset",
+			"preset", presetName,
+			"reasoning_effort", reasoningEffort,
+		)
+	}
+
+	return maxBatchBytes, perChunkTimeout, reasoningEffort
 }

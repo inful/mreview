@@ -79,6 +79,12 @@ type Config struct {
 	Temperature float64
 	MaxTokens   int
 
+	// ReasoningEffort controls the reasoning budget for
+	// o-series-style models. Empty means "use the server's
+	// default". Forwarded to llm.ChatRequest.ReasoningEffort;
+	// providers that don't support the field ignore it.
+	ReasoningEffort llm.ReasoningEffort
+
 	// PerChunkTimeout is the per-LLM-call timeout. 0 means no
 	// per-call override (rely on context).
 	PerChunkTimeout time.Duration
@@ -427,13 +433,14 @@ func (r *Reviewer) reviewChunks(ctx context.Context, mr *gitlab.MergeRequest, ch
 	}
 
 	resp, err := r.cfg.LLM.Chat(ctx, llm.ChatRequest{
-		System:         system,
-		User:           user,
-		Model:          r.cfg.Model,
-		Temperature:    r.cfg.Temperature,
-		MaxTokens:      r.cfg.MaxTokens,
-		ResponseFormat: llm.ResponseFormatJSONObject,
-		Timeout:        r.cfg.PerChunkTimeout,
+		System:          system,
+		User:            user,
+		Model:           r.cfg.Model,
+		Temperature:     r.cfg.Temperature,
+		MaxTokens:       r.cfg.MaxTokens,
+		ResponseFormat:  llm.ResponseFormatJSONObject,
+		ReasoningEffort: r.cfg.ReasoningEffort,
+		Timeout:         r.cfg.PerChunkTimeout,
 	})
 	if err != nil {
 		return llm.ReviewResponse{}, fmt.Errorf("llm: %w", err)
@@ -478,13 +485,14 @@ func (r *Reviewer) consolidate(ctx context.Context, mr *gitlab.MergeRequest, chu
 	)
 
 	resp, err := r.cfg.LLM.Chat(ctx, llm.ChatRequest{
-		System:         system,
-		User:           user,
-		Model:          r.cfg.Model,
-		Temperature:    r.cfg.Temperature,
-		MaxTokens:      r.cfg.MaxTokens,
-		ResponseFormat: llm.ResponseFormatJSONObject,
-		Timeout:        r.cfg.PerChunkTimeout,
+		System:          system,
+		User:            user,
+		Model:           r.cfg.Model,
+		Temperature:     r.cfg.Temperature,
+		MaxTokens:       r.cfg.MaxTokens,
+		ResponseFormat:  llm.ResponseFormatJSONObject,
+		ReasoningEffort: r.cfg.ReasoningEffort,
+		Timeout:         r.cfg.PerChunkTimeout,
 	})
 	if err != nil {
 		// Fallback: assemble manually so the user gets the

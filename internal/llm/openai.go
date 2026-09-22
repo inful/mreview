@@ -103,8 +103,9 @@ func NewOpenAIProvider(cfg OpenAIConfig) (*OpenAIProvider, error) {
 // Chat sends one chat-completion request.
 //
 // Honors ChatRequest.System (sent as a system message), .User
-// (sent as a user message), .Temperature, .MaxTokens, and
-// .ResponseFormat (JSON-object mode when set).
+// (sent as a user message), .Temperature, .MaxTokens,
+// .ResponseFormat (JSON-object mode when set), and
+// .ReasoningEffort (o-series-style reasoning budget).
 func (p *OpenAIProvider) Chat(ctx context.Context, req ChatRequest) (*ChatResponse, error) {
 	if strings.TrimSpace(req.User) == "" {
 		return nil, errors.New("llm: ChatRequest.User is empty")
@@ -135,6 +136,11 @@ func (p *OpenAIProvider) Chat(ctx context.Context, req ChatRequest) (*ChatRespon
 		params.ResponseFormat = openai.ChatCompletionNewParamsResponseFormatUnion{
 			OfJSONObject: &openai.ResponseFormatJSONObjectParam{},
 		}
+	}
+	if req.ReasoningEffort != "" {
+		// No-op for providers / models that don't honour
+		// reasoning_effort — they ignore the field on the wire.
+		params.ReasoningEffort = openai.ReasoningEffort(req.ReasoningEffort)
 	}
 
 	callCtx := ctx

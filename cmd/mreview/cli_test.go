@@ -35,7 +35,7 @@ llm_preset_by_model:
 	}
 
 	var logBuf bytes.Buffer
-	maxBytes, timeout := resolveLLMSettings(cfg, "qwen2.5-coder:7b", 0, 0, 8192, newTestLogger(&logBuf))
+	maxBytes, timeout, _ := resolveLLMSettings(cfg, "qwen2.5-coder:7b", 0, 0, "", 8192, newTestLogger(&logBuf))
 
 	if maxBytes < 520000 || maxBytes > 545000 {
 		t.Errorf("maxBytes = %d; want in [520000, 545000]", maxBytes)
@@ -65,7 +65,7 @@ llm_preset_by_model:
 	}
 
 	var logBuf bytes.Buffer
-	maxBytes, timeout := resolveLLMSettings(cfg, "qwen2.5-coder:7b", 300000, 10*time.Minute, 8192, newTestLogger(&logBuf))
+	maxBytes, timeout, _ := resolveLLMSettings(cfg, "qwen2.5-coder:7b", 300000, 10*time.Minute, "", 8192, newTestLogger(&logBuf))
 
 	if maxBytes != 300000 {
 		t.Errorf("CLI value should win: maxBytes = %d, want 300000", maxBytes)
@@ -95,7 +95,7 @@ llm_preset_by_model:
 	}
 
 	var logBuf bytes.Buffer
-	maxBytes, timeout := resolveLLMSettings(cfg, "unknown-model", 0, 0, 8192, newTestLogger(&logBuf))
+	maxBytes, timeout, _ := resolveLLMSettings(cfg, "unknown-model", 0, 0, "", 8192, newTestLogger(&logBuf))
 
 	if maxBytes != 0 {
 		t.Errorf("maxBytes = %d; want 0 (no preset, no CLI)", maxBytes)
@@ -113,10 +113,64 @@ llm_preset_by_model:
 // on the CLI).
 func TestResolveLLMSettings_NilConfig(t *testing.T) {
 	var logBuf bytes.Buffer
-	maxBytes, timeout := resolveLLMSettings(nil, "any-model", 0, 0, 8192, newTestLogger(&logBuf))
+	maxBytes, timeout, _ := resolveLLMSettings(nil, "any-model", 0, 0, "", 8192, newTestLogger(&logBuf))
 
 	if maxBytes != 0 || timeout != 0 {
 		t.Errorf("nil config: maxBytes=%d timeout=%v; want 0/0", maxBytes, timeout)
+	}
+}
+
+// TestResolveLLMSettings_ReasoningEffortFromPreset verifies that
+// when a preset declares a reasoning_effort and the CLI didn't
+// override it, the helper fills the value in and logs it.
+func TestResolveLLMSettings_ReasoningEffortFromPreset(t *testing.T) {
+	cfg, err := config.Parse([]byte(`
+llm_presets:
+  o-series:
+    context_window: 200000
+    per_chunk_timeout: 15m
+    reasoning_effort: high
+
+llm_preset_by_model:
+  "o3-mini": o-series
+`))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+
+	var logBuf bytes.Buffer
+	_, _, effort := resolveLLMSettings(cfg, "o3-mini", 0, 0, "", 8192, newTestLogger(&logBuf))
+
+	if effort != "high" {
+		t.Errorf("effort = %q; want high (from preset)", effort)
+	}
+	if !strings.Contains(logBuf.String(), "reasoning_effort from preset") {
+		t.Errorf("expected preset-applied log, got:\n%s", logBuf.String())
+	}
+}
+
+// TestResolveLLMSettings_ReasoningEffortCLIOverridesPreset confirms
+// the CLI value wins over the preset's reasoning_effort.
+func TestResolveLLMSettings_ReasoningEffortCLIOverridesPreset(t *testing.T) {
+	cfg, err := config.Parse([]byte(`
+llm_presets:
+  o-series:
+    context_window: 200000
+    per_chunk_timeout: 15m
+    reasoning_effort: high
+
+llm_preset_by_model:
+  "o3-mini": o-series
+`))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+
+	var logBuf bytes.Buffer
+	_, _, effort := resolveLLMSettings(cfg, "o3-mini", 0, 0, "low", 8192, newTestLogger(&logBuf))
+
+	if effort != "low" {
+		t.Errorf("effort = %q; want low (CLI wins)", effort)
 	}
 }
 
@@ -136,7 +190,7 @@ llm_preset_by_model:
 	}
 
 	var logBuf bytes.Buffer
-	maxBytes, _ := resolveLLMSettings(cfg, "qwen2.5-coder:7b", 0, 0, 8192, newTestLogger(&logBuf))
+	maxBytes, _, _ := resolveLLMSettings(cfg, "qwen2.5-coder:7b", 0, 0, "", 8192, newTestLogger(&logBuf))
 
 	if maxBytes != 0 {
 		t.Errorf("dangling reference: maxBytes = %d; want 0", maxBytes)

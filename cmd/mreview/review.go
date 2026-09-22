@@ -35,6 +35,12 @@ type ReviewCmd struct {
 	Temperature float64 `default:"0.2" name:"temperature" env:"MREVIEW_TEMPERATURE" help:"LLM sampling temperature (0.0-2.0)."`
 	MaxTokens   int     `default:"2048" name:"max-tokens" env:"MREVIEW_MAX_TOKENS" help:"LLM max output tokens per call."`
 
+	// ReasoningEffort controls how much reasoning-capable models
+	// (OpenAI o-series, Azure AI Foundry, Groq, Together, etc.)
+	// think before answering. Empty = use the server's default.
+	// Ignored by providers/models that don't support the field.
+	ReasoningEffort string `name:"reasoning-effort" env:"MREVIEW_REASONING_EFFORT" help:"Reasoning budget for o-series-style models: 'low' / 'medium' / 'high'. Empty = server default. No-op for models that don't support the field."`
+
 	// Diff / chunking.
 	MaxDiffBytes int `default:"200000" name:"max-diff-bytes" env:"MREVIEW_MAX_DIFF_BYTES" help:"Per-chunk byte budget; larger files return an error."`
 
@@ -126,8 +132,8 @@ func runReview(stdout io.Writer, c *ReviewCmd, cfg *config.File, logger *slog.Lo
 	}
 
 	// Apply LLM preset (CLI flags take precedence).
-	c.MaxBatchBytes, c.PerChunkTimeout = resolveLLMSettings(
-		cfg, c.Model, c.MaxBatchBytes, c.PerChunkTimeout, c.MaxTokens, logger,
+	c.MaxBatchBytes, c.PerChunkTimeout, c.ReasoningEffort = resolveLLMSettings(
+		cfg, c.Model, c.MaxBatchBytes, c.PerChunkTimeout, c.ReasoningEffort, c.MaxTokens, logger,
 	)
 
 	rev, err := reviewer.NewReviewer(reviewer.Config{
@@ -138,6 +144,7 @@ func runReview(stdout io.Writer, c *ReviewCmd, cfg *config.File, logger *slog.Lo
 		MaxBatchBytes:      c.MaxBatchBytes,
 		Temperature:        c.Temperature,
 		MaxTokens:          c.MaxTokens,
+		ReasoningEffort:    llm.ReasoningEffort(c.ReasoningEffort),
 		PerChunkTimeout:    c.PerChunkTimeout,
 		Logger:             logger,
 		DryRun:             c.DryRun,

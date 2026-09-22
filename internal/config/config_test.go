@@ -340,6 +340,58 @@ llm_preset_by_model:
 	}
 }
 
+// TestApplyPreset_ReasoningEffort verifies that the
+// reasoning_effort field on an LLMPreset is parsed and returned
+// to callers. Reasoning-capable models (o-series, Azure AI Foundry,
+// Groq, etc.) use this to control the reasoning budget.
+func TestApplyPreset_ReasoningEffort(t *testing.T) {
+	yaml := `
+llm_presets:
+  opus-local:
+    context_window: 168000
+    per_chunk_timeout: 15m
+  o-series:
+    context_window: 200000
+    reasoning_effort: high
+
+llm_preset_by_model:
+  "o3-mini": o-series
+`
+	f, err := Parse([]byte(yaml))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+
+	_, p, ok := f.ApplyPreset("o3-mini")
+	if !ok {
+		t.Fatal("expected preset match for o3-mini")
+	}
+	if p.ReasoningEffort != "high" {
+		t.Errorf("ReasoningEffort = %q, want high", p.ReasoningEffort)
+	}
+
+	// opus-local doesn't set reasoning_effort — should default to "".
+	_, p, ok = f.ApplyPreset("qwen2.5-coder:7b")
+	if !ok || p == (LLMPreset{}) {
+		_ = ok
+	}
+	// ApplyPreset for qwen2.5-coder:7b isn't in this fixture; use a
+	// separate YAML to confirm the default-empty case.
+	yaml2 := `
+llm_presets:
+  plain:
+    context_window: 8000
+
+llm_preset_by_model:
+  "m": plain
+`
+	f2, _ := Parse([]byte(yaml2))
+	_, p2, _ := f2.ApplyPreset("m")
+	if p2.ReasoningEffort != "" {
+		t.Errorf("omitted reasoning_effort should default to empty, got %q", p2.ReasoningEffort)
+	}
+}
+
 // TestApplyPreset_Miss verifies that an unknown model returns ok=false
 // without panicking — caller is expected to fall back to defaults
 // and log a warning.

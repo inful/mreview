@@ -191,6 +191,61 @@ func TestChat_RequestShape(t *testing.T) {
 	}
 }
 
+// TestChat_ReasoningEffort_Forwarded verifies that when
+// ChatRequest.ReasoningEffort is non-empty, the request body
+// includes the `reasoning_effort` field — and that when it's
+// empty, the field is omitted (so non-reasoning models don't
+// see a parameter they don't understand).
+func TestChat_ReasoningEffort_Forwarded(t *testing.T) {
+	cases := []struct {
+		name        string
+		set         ReasoningEffort
+		wantPresent bool
+		wantValue   string
+	}{
+		{"unset is omitted", "", false, ""},
+		{"low is forwarded", ReasoningEffortLow, true, "low"},
+		{"medium is forwarded", ReasoningEffortMedium, true, "medium"},
+		{"high is forwarded", ReasoningEffortHigh, true, "high"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			stub := newLLMStub(t)
+			stub.enqueue(http.StatusOK, happyChatResponse)
+			p := newProvider(t, stub.URL)
+
+			_, err := p.Chat(context.Background(), ChatRequest{
+				User:            "user",
+				Model:           "gpt-x",
+				ReasoningEffort: tc.set,
+			})
+			if err != nil {
+				t.Fatalf("Chat: %v", err)
+			}
+			if len(stub.requests) != 1 {
+				t.Fatalf("expected 1 request, got %d", len(stub.requests))
+			}
+			var sent map[string]any
+			if err := json.Unmarshal([]byte(stub.requests[0].Body), &sent); err != nil {
+				t.Fatalf("body not JSON: %v", err)
+			}
+			got, ok := sent["reasoning_effort"]
+			if !ok {
+				if tc.wantPresent {
+					t.Errorf("reasoning_effort missing; want %q", tc.wantValue)
+				}
+				return
+			}
+			if !tc.wantPresent {
+				t.Errorf("reasoning_effort = %q; want it absent", got)
+			}
+			if got != tc.wantValue {
+				t.Errorf("reasoning_effort = %q; want %q", got, tc.wantValue)
+			}
+		})
+	}
+}
+
 func TestChat_DefaultModel(t *testing.T) {
 	stub := newLLMStub(t)
 	stub.enqueue(http.StatusOK, happyChatResponse)
