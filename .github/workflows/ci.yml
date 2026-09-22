@@ -92,6 +92,22 @@ jobs:
           GOARCH: ${{ matrix.arch }}
           CGO_ENABLED: 0
         run: |
+          echo "=== Working directory ==="
           pwd
+          echo "=== Top-level files (should include cmd/, internal/, go.mod) ==="
+          ls -la
+          echo "=== git status (should be clean) ==="
+          git status --short
+          echo "=== git log --oneline ==="
+          git log --oneline -1
+          echo "=== ls cmd/ ==="
+          ls cmd/ || echo "cmd/ missing — re-checking out"
+          if [ ! -d cmd/mreview ]; then
+            echo "Forcing fresh checkout..."
+            git clean -fdx
+            git fetch --depth=1 origin main
+            git checkout -B main origin/main
+          fi
+          echo "=== Final ls cmd/ ==="
           ls cmd/
           go build -trimpath -ldflags="-s -w" -o dist/mreview-${{ matrix.os }}-${{ matrix.arch }} ./cmd/mreview
