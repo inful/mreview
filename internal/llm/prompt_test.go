@@ -313,15 +313,44 @@ func TestBuildReviewPrompt_RequiresFindingsOnSubstantiveDiff(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildReviewPrompt: %v", err)
 	}
-	// The new "must emit" instruction is present.
-	if !strings.Contains(system, "Do NOT emit an empty findings array") {
-		t.Errorf("system prompt missing the 'do not emit empty findings' rule; see issue #14")
-	}
-	if !strings.Contains(system, "severity \"info\"") {
-		t.Errorf("system prompt missing the severity 'info' fallback for clean diffs")
+	// The empty-findings prohibition is present (the prompt declares
+	// it a malformed response when paired with a substantive summary).
+	if !strings.Contains(system, "empty findings array is ONLY valid") {
+		t.Errorf("system prompt missing the empty-findings-only-when-clean rule")
 	}
 	// The old "emit empty findings when clean" wording is gone.
 	if strings.Contains(system, "emit an empty findings array and a one-sentence \"LGTM\" summary") {
 		t.Errorf("old 'LGTM' empty-findings instruction still present; see issue #14")
+	}
+}
+
+// TestBuildReviewPrompt_FindingsArePrimary pins the new rules
+// added after issue #14's fix proved insufficient for stronger
+// models: capable LLMs were producing `{"findings":[], "summary":
+// "MR is not fit for merging because..."}` — they treated the
+// summary as the primary output and skipped the structured
+// findings array. The prompt now explicitly requires every issue
+// mentioned in the summary to also appear as a finding, and
+// declares "summary without findings is malformed."
+func TestBuildReviewPrompt_FindingsArePrimary(t *testing.T) {
+	system, _, err := BuildReviewPrompt(sampleMeta(), sampleChunks(), PromptOptions{})
+	if err != nil {
+		t.Fatalf("BuildReviewPrompt: %v", err)
+	}
+	// New: the "findings are primary" framing must be present.
+	wantFragments := []string{
+		"`findings` array is the primary output",
+		"SHORT narrative recap",
+		"MUST have a corresponding entry in the findings array",
+		"cannot point at a file:line",
+		"drop it from the summary too",
+		"empty findings array is ONLY valid",
+		"LGTM, no issues found",
+		"malformed response",
+	}
+	for _, frag := range wantFragments {
+		if !strings.Contains(system, frag) {
+			t.Errorf("system prompt missing required fragment %q", frag)
+		}
 	}
 }
