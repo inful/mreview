@@ -47,23 +47,57 @@ func (c *Client) PostDiscussion(ctx context.Context, project string, iid int, re
 	var result *Discussion
 	op := "PostDiscussion"
 	err := doWithRetry(ctx, c.retry, op, func(ctx context.Context, attempt int) error {
-		file := cmt.File
-		oldPath := cmt.OldPath
-		newLine := int64(cmt.NewLine)
-		oldLine := int64(cmt.OldLine)
-		posType := "text"
+		// GitLab's /discussions endpoint requires position fields
+		// to match the file status (per the docs):
+		//   - New / modified / unchanged line: send new_path +
+		//     new_line; send old_path only when it differs from
+		//     new_path (renamed files).
+		//   - Deleted file / removed line: send old_path + old_line;
+		//     omit new_path and new_line entirely.
+		//
+		// Sending "" or 0 in any field — which the previous code
+		// did — makes GitLab return a generic 500 because the
+		// internal diff-line lookup fails on the bogus anchor.
+		// We use nil pointers (with `omitempty` on the position
+		// fields) to drop fields entirely instead.
+		//
+		// Discrimination between new-side and old-side comments is
+		// based on which line field is set: NewLine > 0 means
+		// "comment is on the new side", OldLine > 0 means "comment
+		// is on the old side". reviewer's buildInlineComment
+		// guarantees exactly one of these is set per finding.
+		pos := &gl.PositionOptions{
+			BaseSHA:      &refs.BaseSHA,
+			StartSHA:     &refs.StartSHA,
+			HeadSHA:      &refs.HeadSHA,
+			PositionType: ptrString("text"),
+		}
+		switch {
+		case cmt.NewLine > 0:
+			f := cmt.File
+			pos.NewPath = &f
+			nl := int64(cmt.NewLine)
+			pos.NewLine = &nl
+			if cmt.OldPath != "" && cmt.OldPath != cmt.File {
+				op := cmt.OldPath
+				pos.OldPath = &op
+			}
+		case cmt.OldLine > 0:
+			// cmt.File for deleted files already IS the old path
+			// (Chunk.File resolves to NewPath when present, else
+			// OldPath). Use cmt.OldPath if set (callers may set it
+			// explicitly), else fall back to cmt.File.
+			op := cmt.OldPath
+			if op == "" {
+				op = cmt.File
+			}
+			pos.OldPath = &op
+			ol := int64(cmt.OldLine)
+			pos.OldLine = &ol
+		}
 		opts := &gl.CreateMergeRequestDiscussionOptions{
-			Body: &body,
-			Position: &gl.PositionOptions{
-				BaseSHA:      &refs.BaseSHA,
-				StartSHA:     &refs.StartSHA,
-				HeadSHA:      &refs.HeadSHA,
-				PositionType: &posType,
-				NewPath:      &file,
-				OldPath:      &oldPath,
-				NewLine:      &newLine,
-				OldLine:      &oldLine,
-			},
+			Body:     &body,
+			Position: pos,
 		}
 		disc, resp, err := c.inner.Discussions.CreateMergeRequestDiscussion(project, int64(iid), opts)
 		if err != nil {
@@ -86,6 +120,10 @@ func (c *Client) PostDiscussion(ctx context.Context, project string, iid int, re
 	}
 	return result, nil
 }
+
+// ptrString returns a pointer to s. Tiny helper to make
+// optional-position-field construction in PostDiscussion read cleanly.
+func ptrString(s string) *string { return &s }
 
 // classifyPostDiscussionError is the inline-discussion sibling of
 // classifyPostSummaryError.

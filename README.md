@@ -778,11 +778,21 @@ ensure it has the `api` scope (not `read_api`).
 GITLAB_TOKEN=glpat-xxx mreview doctor --skip-llm
 ```
 
-### "transient failure (retries exhausted)"
+### "transient failure (retries exhausted)" on every inline discussion (summary still posts)
 
-GitLab returned 5xx three times in a row (default retry count). Check
-GitLab's status page and your local network. The review can be retried
-manually with the same `mreview review` command.
+The classic symptom is `findings_total=N findings_posted=0 summary_posted=true` — every inline discussion fails after three retries with HTTP 500, but the summary note posts fine. Both endpoints are authenticated and authorized the same way, so the failure mode is endpoint-specific.
+
+**Root cause**: GitLab's `/discussions` endpoint requires position fields to match the file's diff status. From the [API docs](https://docs.gitlab.com/api/discussions/#create-new-merge-request-thread):
+
+> Both `position[old_path]` and `position[new_path]` are required and must refer to the file path before and after the change.
+>
+> To create a thread on an added line (highlighted in green in the merge request diff), use `position[new_line]` and don't include `position[old_line]`.
+
+A comment anchored to the **new side** of the diff must send `new_path + new_line` only; a comment on a removed line or deleted file must send `old_path + old_line` only. Sending `old_line: 0` (or empty `old_path: ""`) makes GitLab's internal diff-line lookup fail with a generic 500 — there's no line 0 to anchor against.
+
+mreview's reviewer uses the diff metadata from the chunker (`ChangeFile.IsNew`, `IsDeleted`, `OldPath`, `NewPath`) to construct the right position shape per file status. If you're seeing this error on an older release, upgrade — the fix landed in v0.3.1.
+
+If you're still seeing this on the latest release, share the relevant GitLab `production.log` stack trace for the 500; it will name which position field GitLab's parser is choking on.
 
 ### "list models: ..." or "ping: ..." failures in `mreview doctor`
 

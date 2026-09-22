@@ -351,6 +351,7 @@ func (r *Reviewer) ReviewMR(ctx context.Context, project string, iid int, action
 	// (LLM hallucination guard) and drop the rest through the
 	// GitLab poster.
 	validFiles := pathIndex(changes)
+	fileMeta := fileMetaIndex(changes)
 	filteredFindings := filterFindings(final.Findings, validFiles, logger)
 
 	// Dedupe against the bot's prior comments. Phase 6 keeps this
@@ -397,7 +398,11 @@ func (r *Reviewer) ReviewMR(ctx context.Context, project string, iid int, action
 	// Post inline findings.
 	if r.cfg.CommentMode != CommentModeSummaryOnly {
 		for _, f := range filteredFindings {
-			pf := r.postFinding(ctx, project, iid, mr.DiffRefs, f)
+			// Look up the file's diff metadata so postFinding can
+			// construct the correct position (new / modified /
+			// deleted / renamed) — see postFinding's docstring.
+			meta := fileMeta[f.File]
+			pf := r.postFinding(ctx, project, iid, mr.DiffRefs, meta, f)
 			result.Findings = append(result.Findings, pf)
 		}
 	}
@@ -609,6 +614,20 @@ func pathIndex(changes []gitlab.ChangeFile) map[string]bool {
 	out := make(map[string]bool, len(changes))
 	for _, c := range changes {
 		out[c.Path()] = true
+	}
+	return out
+}
+
+// fileMetaIndex returns the per-file diff metadata, keyed by
+// canonical path (Path() returns NewPath when present, else
+// OldPath). Used by postFinding to construct the correct
+// position shape for the GitLab /discussions endpoint —
+// new / modified / deleted / renamed each require a different
+// combination of new_path / old_path / new_line / old_line.
+func fileMetaIndex(changes []gitlab.ChangeFile) map[string]gitlab.ChangeFile {
+	out := make(map[string]gitlab.ChangeFile, len(changes))
+	for _, c := range changes {
+		out[c.Path()] = c
 	}
 	return out
 }
