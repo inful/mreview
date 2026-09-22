@@ -178,21 +178,38 @@ func resolveLLMSettings(
 	)
 
 	if maxBatchBytes == 0 {
-		derived := config.DeriveMaxBatchBytes(preset.ContextWindow, maxTokens)
-		if derived > 0 {
-			maxBatchBytes = derived
-			logger.Info("max_batch_bytes derived from preset",
+		switch {
+		case preset.MaxBatchBytes > 0:
+			// Preset-supplied override wins over the derivation.
+			// Operators tune this for models whose effective context
+			// is smaller than their advertised window, or for
+			// models that can't process a packed batch within
+			// PerChunkTimeout even when the prompt technically fits.
+			maxBatchBytes = preset.MaxBatchBytes
+			logger.Info("max_batch_bytes from preset",
 				"preset", presetName,
+				"max_batch_bytes", maxBatchBytes,
 				"context_window", preset.ContextWindow,
 				"max_tokens", maxTokens,
-				"max_batch_bytes", derived,
+				"derived_value", config.DeriveMaxBatchBytes(preset.ContextWindow, maxTokens),
 			)
-		} else {
-			logger.Warn("max_batch_bytes derivation infeasible; packing disabled",
-				"preset", presetName,
-				"context_window", preset.ContextWindow,
-				"max_tokens", maxTokens,
-			)
+		default:
+			derived := config.DeriveMaxBatchBytes(preset.ContextWindow, maxTokens)
+			if derived > 0 {
+				maxBatchBytes = derived
+				logger.Info("max_batch_bytes derived from preset",
+					"preset", presetName,
+					"context_window", preset.ContextWindow,
+					"max_tokens", maxTokens,
+					"max_batch_bytes", derived,
+				)
+			} else {
+				logger.Warn("max_batch_bytes derivation infeasible; packing disabled",
+					"preset", presetName,
+					"context_window", preset.ContextWindow,
+					"max_tokens", maxTokens,
+				)
+			}
 		}
 	} else {
 		logger.Info("max_batch_bytes override (CLI flag wins over preset)",

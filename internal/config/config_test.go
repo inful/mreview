@@ -340,6 +340,53 @@ llm_preset_by_model:
 	}
 }
 
+// TestParsePreset_MaxBatchBytes verifies that the optional
+// max_batch_bytes field on an LLMPreset parses and is returned to
+// callers. Operators tune this when their model's effective context
+// is smaller than its advertised window, or when empirical
+// wall-clock shows the model can't process a packed batch within
+// PerChunkTimeout.
+func TestParsePreset_MaxBatchBytes(t *testing.T) {
+	yaml := `
+llm_presets:
+  tuned:
+    context_window: 168000
+    per_chunk_timeout: 5m
+    max_batch_bytes: 5000
+
+llm_preset_by_model:
+  "coding-agent": tuned
+`
+	f, err := Parse([]byte(yaml))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+
+	_, p, ok := f.ApplyPreset("coding-agent")
+	if !ok {
+		t.Fatal("expected preset match for coding-agent")
+	}
+	if p.MaxBatchBytes != 5000 {
+		t.Errorf("MaxBatchBytes = %d, want 5000", p.MaxBatchBytes)
+	}
+
+	// Absent field defaults to zero — the resolveLLMSettings
+	// helper treats 0 as "use the derived value".
+	yaml2 := `
+llm_presets:
+  derived:
+    context_window: 168000
+
+llm_preset_by_model:
+  "m": derived
+`
+	f2, _ := Parse([]byte(yaml2))
+	_, p2, _ := f2.ApplyPreset("m")
+	if p2.MaxBatchBytes != 0 {
+		t.Errorf("omitted max_batch_bytes should default to zero, got %d", p2.MaxBatchBytes)
+	}
+}
+
 // TestApplyPreset_ReasoningEffort verifies that the
 // reasoning_effort field on an LLMPreset is parsed and returned
 // to callers. Reasoning-capable models (o-series, Azure AI Foundry,

@@ -120,7 +120,17 @@ llm_presets:
     per_chunk_timeout: 15m
     reasoning_effort: high
 
+  # Coding agent. Effective context is smaller than the advertised
+  # 168k window; the max_batch_bytes override pins batch size to a
+  # value the model can process within per_chunk_timeout. Tune by
+  # running with --max-batch-bytes=N and seeing what completes.
+  coding-agent:
+    context_window: 168000
+    per_chunk_timeout: 5m
+    max_batch_bytes: 3000
+
 llm_preset_by_model:
   "qwen2.5-coder:7b": opus-local
   "gemma-26b-e4b":    gemma-26b-e4b
   "o3-mini":          o-series
+  "coding-agent":     coding-agent
