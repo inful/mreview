@@ -1,6 +1,7 @@
 package reviewer
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -826,6 +827,75 @@ func TestBatchChunks(t *testing.T) {
 		if len(b) != 1 {
 			t.Errorf("batch %d has %d chunks, want 1", i, len(b))
 		}
+	}
+}
+
+// twoFilesFixture is a diff with two files (a.go and b.go). Each
+// becomes its own chunk under the current batchChunks
+// implementation, so a review against this fixture triggers two
+// LLM calls.
+const twoFilesFixture = `[
+	{"old_path":"a.go","new_path":"a.go","new_file":false,"deleted_file":false,"renamed_file":false,"diff":"@@ -1 +1 @@\n-old\n+new\n"},
+	{"old_path":"b.go","new_path":"b.go","new_file":false,"deleted_file":false,"renamed_file":false,"diff":"@@ -1 +1 @@\n-foo\n+bar\n"}
+]`
+
+// TestReviewMR_ChunkFailure_LogsBatchAndFiles confirms that when
+// one chunk's LLM call fails, the warn log line carries enough
+// context for an operator to identify which file was dropped
+// (batch index + file list) without re-reading the prompts.
+//
+// The failure is simulated by giving fakeLLM one body when two
+// chunks will be reviewed; the second chat call hits the stub's
+// "no body queued" 500, propagates back through reviewChunks, and
+// triggers the warn path.
+func TestReviewMR_ChunkFailure_LogsBatchAndFiles(t *testing.T) {
+	g := newFakeGitLab(t)
+	g.enqueue(http.StatusOK, mrFixture)
+	g.enqueue(http.StatusOK, twoFilesFixture) // 2 files → 2 chunks → 2 LLM calls
+	g.enqueue(http.StatusOK, "[]")            // ListDiscussions
+	g.enqueue(http.StatusCreated, `{"id":1,"body":"summary"}`)
+
+	// First chunk succeeds; second chunk fails (no body queued).
+	l := newFakeLLM(t,
+		`{"findings":[{"file":"a.go","line":1,"severity":"info","category":"style","body":"x"}],"summary":"ok"}`,
+	)
+
+	var logBuf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	glt, _ := gitlab.NewClient(g.URL, "test-token", gitlab.RetryConfig{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	p, _ := llm.NewOpenAIProvider(llm.OpenAIConfig{BaseURL: l.URL, APIKey: "k", Model: "m"})
+	r, err := NewReviewer(Config{
+		GitLab: glt, LLM: p, Model: "m", MaxDiffBytes: 4096,
+		Logger: logger,
+	})
+	if err != nil {
+		t.Fatalf("NewReviewer: %v", err)
+	}
+
+	if _, err := r.ReviewMR(context.Background(), "group/project", 42); err != nil {
+		t.Fatalf("ReviewMR: %v", err)
+	}
+
+	logs := logBuf.String()
+	if !strings.Contains(logs, "level=WARN") {
+		t.Fatalf("expected a WARN log line, got:\n%s", logs)
+	}
+	if !strings.Contains(logs, "chunk review failed") {
+		t.Fatalf("expected the chunk-review-failed message, got:\n%s", logs)
+	}
+	// Batch index: second chunk fails, so batch=2.
+	if !strings.Contains(logs, "batch=2") {
+		t.Errorf("expected batch=2 in warn log (second chunk failed), got:\n%s", logs)
+	}
+	// File path of the failed chunk. The first chunk succeeded
+	// so the only file referenced in the warn log should be b.go.
+	if !strings.Contains(logs, "files=b.go") {
+		t.Errorf("expected files=b.go in warn log (second chunk's file), got:\n%s", logs)
+	}
+	// The successful chunk's file must NOT appear in the failure log.
+	if strings.Contains(logs, "files=a.go") {
+		t.Errorf("warn log should not carry the successful chunk's file, got:\n%s", logs)
 	}
 }
 

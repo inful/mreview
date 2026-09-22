@@ -288,8 +288,15 @@ func (r *Reviewer) ReviewMR(ctx context.Context, project string, iid int, action
 		if err != nil {
 			// A single failed chunk doesn't fail the whole review —
 			// we log and substitute an empty response so the summary
-			// note still gets posted (it'll explain the gap).
-			logger.Warn("chunk review failed", "err", err.Error())
+			// note still gets posted (it'll explain the gap). The
+			// log carries the batch index + bounded file list so
+			// operators can identify which chunk was dropped without
+			// re-reading every prompt.
+			logger.Warn("chunk review failed",
+				"batch", idx+1,
+				"files", chunkFileList(chunkBatch),
+				"err", err.Error(),
+			)
 			chunkResponses = append(chunkResponses, llm.ReviewResponse{})
 			continue
 		}
@@ -489,6 +496,29 @@ func batchChunks(chunks []llm.Chunk) [][]llm.Chunk {
 		out[i] = []llm.Chunk{c}
 	}
 	return out
+}
+
+// chunkFileList renders the file paths in a batch as a comma-
+// separated string suitable for log output. Capped at the first
+// `maxChunkLogFiles` entries with an "(N more)" tail to keep log
+// lines bounded when a batch contains many chunks. Today
+// batchChunks emits one chunk per batch, but the batching API
+// supports packing small chunks together — this helper stays
+// correct if that optimization lands later.
+func chunkFileList(chunks []llm.Chunk) string {
+	const maxChunkLogFiles = 5
+	if len(chunks) == 0 {
+		return ""
+	}
+	files := make([]string, 0, len(chunks))
+	for i, c := range chunks {
+		if i >= maxChunkLogFiles {
+			files = append(files, fmt.Sprintf("(%d more)", len(chunks)-maxChunkLogFiles))
+			break
+		}
+		files = append(files, c.File)
+	}
+	return strings.Join(files, ",")
 }
 
 // pathIndex returns the set of file paths present in the diff.
