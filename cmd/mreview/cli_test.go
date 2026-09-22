@@ -149,6 +149,66 @@ llm_preset_by_model:
 	}
 }
 
+// TestResolveLLMSettings_MaxBatchBytesFromPreset verifies that a
+// preset's max_batch_bytes override is applied when the CLI is
+// unset, and that it wins over the derivation from context_window.
+// This is the path operators use to tune batch size for models
+// whose effective context is smaller than their advertised window
+// or that can't process packed batches within PerChunkTimeout.
+func TestResolveLLMSettings_MaxBatchBytesFromPreset(t *testing.T) {
+	cfg, err := config.Parse([]byte(`
+llm_presets:
+  coding-agent:
+    context_window: 168000
+    per_chunk_timeout: 5m
+    max_batch_bytes: 5000
+
+llm_preset_by_model:
+  "coding-agent": coding-agent
+`))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+
+	var logBuf bytes.Buffer
+	maxBytes, _, _ := resolveLLMSettings(cfg, "coding-agent", 0, 0, "", 8192, newTestLogger(&logBuf))
+
+	if maxBytes != 5000 {
+		t.Errorf("maxBytes = %d; want 5000 (preset wins over derivation)", maxBytes)
+	}
+	if !strings.Contains(logBuf.String(), "max_batch_bytes from preset") {
+		t.Errorf("expected preset-applied log, got:\n%s", logBuf.String())
+	}
+}
+
+// TestResolveLLMSettings_MaxBatchBytesCLIOverridesPreset confirms
+// the CLI value wins over the preset's max_batch_bytes override.
+func TestResolveLLMSettings_MaxBatchBytesCLIOverridesPreset(t *testing.T) {
+	cfg, err := config.Parse([]byte(`
+llm_presets:
+  coding-agent:
+    context_window: 168000
+    per_chunk_timeout: 5m
+    max_batch_bytes: 5000
+
+llm_preset_by_model:
+  "coding-agent": coding-agent
+`))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+
+	var logBuf bytes.Buffer
+	maxBytes, _, _ := resolveLLMSettings(cfg, "coding-agent", 3000, 0, "", 8192, newTestLogger(&logBuf))
+
+	if maxBytes != 3000 {
+		t.Errorf("maxBytes = %d; want 3000 (CLI wins over preset)", maxBytes)
+	}
+	if !strings.Contains(logBuf.String(), "CLI flag wins over preset") {
+		t.Errorf("expected CLI-wins log, got:\n%s", logBuf.String())
+	}
+}
+
 // TestResolveLLMSettings_ReasoningEffortCLIOverridesPreset confirms
 // the CLI value wins over the preset's reasoning_effort.
 func TestResolveLLMSettings_ReasoningEffortCLIOverridesPreset(t *testing.T) {

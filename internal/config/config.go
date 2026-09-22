@@ -248,6 +248,20 @@ type LLMPreset struct {
 	// (OpenAI o-series, Azure AI Foundry, Groq, Together, etc.);
 	// providers that don't support the field ignore it.
 	ReasoningEffort string `yaml:"reasoning_effort,omitempty"`
+
+	// MaxBatchBytes is an optional override for the byte budget
+	// used by BatchChunksWithLimit when packing multiple chunks
+	// into a single LLM call. When > 0, this value wins over the
+	// derivation from ContextWindow + MaxTokens. Set this when:
+	//   - The model's effective context is smaller than its
+	//     advertised window (common for heavily quantized local
+	//     models), so the derived budget over-promises.
+	//   - Empirical wall-clock shows the model can't process a
+	//     packed batch within PerChunkTimeout, even though the
+	//     prompt fits the budget.
+	// Empty (zero) means "use the derived value" — the historical
+	// behaviour.
+	MaxBatchBytes int `yaml:"max_batch_bytes,omitempty"`
 }
 
 // Derivation constants for MaxBatchBytes. Tuned for source-code

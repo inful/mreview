@@ -426,11 +426,20 @@ llm_presets:
     context_window: 200000
     per_chunk_timeout: 15m
     reasoning_effort: high
+  coding-agent:
+    # Model's effective context is smaller than advertised; the
+    # max_batch_bytes override pins batch size to a value the model
+    # can process within per_chunk_timeout. Tune by trying
+    # --max-batch-bytes=N at the CLI and seeing what completes.
+    context_window: 168000
+    per_chunk_timeout: 5m
+    max_batch_bytes: 3000
 
 llm_preset_by_model:
   "qwen2.5-coder:7b": opus-local
   "gemma-26b-e4b":    gemma-26b-e4b
   "o3-mini":          o-series
+  "coding-agent":     coding-agent
 ```
 
 When `--model=qwen2.5-coder:7b` matches, mreview derives
@@ -452,8 +461,17 @@ gaps. When a preset applies, you'll see log lines like:
 ```
 INFO LLM preset applied                 preset=opus-local model=qwen2.5-coder:7b context_window=168000
 INFO max_batch_bytes derived from preset preset=opus-local context_window=168000 max_tokens=8192 max_batch_bytes=532432
+INFO max_batch_bytes from preset         preset=coding-agent max_batch_bytes=3000 derived_value=532432
 INFO reasoning_effort from preset        preset=o-series reasoning_effort=high
 ```
+
+Three sources of `max_batch_bytes`, in priority order:
+
+1. **CLI flag** `--max-batch-bytes=N` (one-off override)
+2. **Preset field** `max_batch_bytes: N` (per-model tuning)
+3. **Derived from `context_window`** (sensible default)
+
+Use the preset field when the model's effective context is smaller than its advertised window — common for heavily quantized local models that return empty content (rather than timing out) on prompts technically within the byte budget.
 
 The optional `reasoning_effort` field on a preset (or the matching
 `--reasoning-effort` CLI flag) controls the reasoning budget for
