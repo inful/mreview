@@ -46,7 +46,12 @@ jobs:
       - name: Run golangci-lint
         uses: golangci/golangci-lint-action@v6
         with:
-          version: latest
+          # Pin a specific version that's built with Go ≥ 1.26
+          # (the project's go.mod target). The action's default
+          # bundled linter is built with Go 1.24, which can't load
+          # a .golangci.yml targeting 1.26.7.
+          # Bump this in step with the local tool version (see Makefile).
+          version: v2.13.2
 
       - name: Run go test (race)
         run: go test -race -count=1 -timeout 120s ./...
