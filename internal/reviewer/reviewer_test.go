@@ -818,7 +818,10 @@ func TestBatchChunks(t *testing.T) {
 		{File: "a.go", Diff: "x", Size: 1},
 		{File: "b.go", Diff: "y", Size: 1},
 	}
-	batches := batchChunks(chunks)
+	// maxBytes == 0 preserves the historical one-batch-per-chunk
+	// behaviour. This is the default for anyone not setting the
+	// new --max-batch-bytes flag.
+	batches := batchChunks(chunks, 0)
 	if len(batches) != 2 {
 		t.Errorf("expected 2 batches, got %d", len(batches))
 	}
@@ -826,6 +829,205 @@ func TestBatchChunks(t *testing.T) {
 		if len(b) != 1 {
 			t.Errorf("batch %d has %d chunks, want 1", i, len(b))
 		}
+	}
+}
+
+// TestBatchChunks_PackSmallTogether confirms that small chunks
+// collapse into one batch when their combined size fits the budget.
+func TestBatchChunks_PackSmallTogether(t *testing.T) {
+	chunks := []llm.Chunk{
+		{File: "a.go", Size: 100},
+		{File: "b.go", Size: 100},
+		{File: "c.go", Size: 100},
+	}
+	batches := batchChunks(chunks, 500) // total 300 fits
+	if len(batches) != 1 {
+		t.Fatalf("expected 1 packed batch, got %d", len(batches))
+	}
+	if len(batches[0]) != 3 {
+		t.Errorf("packed batch should have all 3 chunks, got %d", len(batches[0]))
+	}
+}
+
+// TestBatchChunks_GreedyMixed confirms that chunks pack greedily
+// in order — once a batch can't fit the next chunk, it flushes
+// and starts fresh.
+func TestBatchChunks_GreedyMixed(t *testing.T) {
+	chunks := []llm.Chunk{
+		{File: "a.go", Size: 100},
+		{File: "b.go", Size: 100},
+		{File: "c.go", Size: 100},
+		{File: "d.go", Size: 100},
+	}
+	batches := batchChunks(chunks, 250) // 100+100 fits, 100+100+100 doesn't
+	if len(batches) != 2 {
+		t.Fatalf("expected 2 batches (a+b, c+d), got %d", len(batches))
+	}
+	if len(batches[0]) != 2 || batches[0][0].File != "a.go" || batches[0][1].File != "b.go" {
+		t.Errorf("first batch should be [a.go, b.go], got %v", batchFiles(batches[0]))
+	}
+	if len(batches[1]) != 2 || batches[1][0].File != "c.go" || batches[1][1].File != "d.go" {
+		t.Errorf("second batch should be [c.go, d.go], got %v", batchFiles(batches[1]))
+	}
+}
+
+// TestBatchChunks_OversizeChunkAlone confirms that a single chunk
+// larger than the budget goes alone in its own batch (not dropped)
+// so the LLM still gets a chance to handle it.
+func TestBatchChunks_OversizeChunkAlone(t *testing.T) {
+	chunks := []llm.Chunk{
+		{File: "small.go", Size: 50},
+		{File: "huge.go", Size: 10000}, // exceeds budget on its own
+		{File: "small2.go", Size: 50},
+	}
+	batches := batchChunks(chunks, 200)
+	if len(batches) != 3 {
+		t.Fatalf("expected 3 batches (small, huge alone, small2), got %d", len(batches))
+	}
+	if batches[1][0].File != "huge.go" {
+		t.Errorf("oversized chunk should be in its own batch, got %v", batchFiles(batches[1]))
+	}
+	if len(batches[1]) != 1 {
+		t.Errorf("oversized chunk should be alone, got %d chunks", len(batches[1]))
+	}
+}
+
+// TestBatchChunks_ExactFit confirms that chunks whose total size
+// equals the budget exactly all land in one batch (no off-by-one
+// in the comparator).
+func TestBatchChunks_ExactFit(t *testing.T) {
+	chunks := []llm.Chunk{
+		{File: "a.go", Size: 50},
+		{File: "b.go", Size: 50},
+	}
+	batches := batchChunks(chunks, 100) // exactly fits
+	if len(batches) != 1 {
+		t.Fatalf("exact-fit should produce 1 batch, got %d", len(batches))
+	}
+	if len(batches[0]) != 2 {
+		t.Errorf("batch should have 2 chunks, got %d", len(batches[0]))
+	}
+}
+
+// TestBatchChunks_Empty confirms that empty input produces no
+// batches (avoids degenerate one-empty-batch output).
+func TestBatchChunks_Empty(t *testing.T) {
+	if got := batchChunks(nil, 1000); len(got) != 0 {
+		t.Errorf("nil input should produce 0 batches, got %d", len(got))
+	}
+	if got := batchChunks([]llm.Chunk{}, 1000); len(got) != 0 {
+		t.Errorf("empty input should produce 0 batches, got %d", len(got))
+	}
+}
+
+// TestBatchChunks_FallbackToSizeField confirms that when Size is
+// not populated (e.g. chunks constructed by hand in tests), the
+// packer falls back to len(Diff) instead of treating the chunk as
+// zero-sized.
+func TestBatchChunks_FallbackToSizeField(t *testing.T) {
+	chunks := []llm.Chunk{
+		{File: "a.go", Diff: "0123456789"}, // Size = 0, len(Diff) = 10
+		{File: "b.go", Diff: "0123456789"},
+	}
+	batches := batchChunks(chunks, 15) // 10+10 would exceed, so split
+	if len(batches) != 2 {
+		t.Fatalf("expected 2 batches when Size=0 fallback uses len(Diff), got %d", len(batches))
+	}
+}
+
+// batchFiles is a small helper for readable failure messages in
+// the packing tests above.
+func batchFiles(b []llm.Chunk) []string {
+	out := make([]string, len(b))
+	for i, c := range b {
+		out[i] = c.File
+	}
+	return out
+}
+
+// threeFilesFixture is a 3-file diff that fits inside a single
+// batch when MaxBatchBytes is set generously. Used to verify the
+// reviewer makes fewer LLM calls when packing is enabled.
+const threeFilesFixture = `[
+	{"old_path":"a.go","new_path":"a.go","new_file":false,"deleted_file":false,"renamed_file":false,"diff":"@@ -1 +1 @@\n-old\n+new\n"},
+	{"old_path":"b.go","new_path":"b.go","new_file":false,"deleted_file":false,"renamed_file":false,"diff":"@@ -1 +1 @@\n-foo\n+bar\n"},
+	{"old_path":"c.go","new_path":"c.go","new_file":false,"deleted_file":false,"renamed_file":false,"diff":"@@ -1 +1 @@\n-baz\n+qux\n"}
+]`
+
+// TestReviewMR_Packing_ReducesLLMCalls confirms that when
+// MaxBatchBytes is set large enough to fit all chunks, the
+// reviewer collapses N file-level LLM calls into 1.
+func TestReviewMR_Packing_ReducesLLMCalls(t *testing.T) {
+	g := newFakeGitLab(t)
+	g.enqueue(http.StatusOK, mrFixture)
+	g.enqueue(http.StatusOK, threeFilesFixture) // 3 files
+	g.enqueue(http.StatusOK, "[]")              // ListDiscussions
+	g.enqueue(http.StatusCreated, `{"id":1,"body":"summary"}`)
+
+	// Stage exactly one LLM body — if packing works, the test
+	// makes one call. Without packing, the second call would hit
+	// the "no body queued" 500 and the test would fail on the
+	// call-count assertion below.
+	l := newFakeLLM(t,
+		`{"findings":[{"file":"a.go","line":1,"severity":"info","category":"style","body":"x"}],"summary":"ok"}`,
+	)
+
+	glt, _ := gitlab.NewClient(g.URL, "test-token", gitlab.RetryConfig{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	p, _ := llm.NewOpenAIProvider(llm.OpenAIConfig{BaseURL: l.URL, APIKey: "k", Model: "m"})
+	r, err := NewReviewer(Config{
+		GitLab: glt, LLM: p, Model: "m",
+		MaxDiffBytes:  4096,
+		MaxBatchBytes: 100000, // large enough to fit all 3 files
+		Logger:        slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	if err != nil {
+		t.Fatalf("NewReviewer: %v", err)
+	}
+
+	if _, err := r.ReviewMR(context.Background(), "group/project", 42); err != nil {
+		t.Fatalf("ReviewMR: %v", err)
+	}
+
+	if got := l.calls.Load(); got != 1 {
+		t.Errorf("expected 1 LLM call (all 3 chunks packed), got %d", got)
+	}
+}
+
+// TestReviewMR_Packing_DisabledByDefault confirms that the default
+// (MaxBatchBytes == 0) preserves the historical one-call-per-chunk
+// behaviour. A 3-file diff makes 3 LLM calls.
+func TestReviewMR_Packing_DisabledByDefault(t *testing.T) {
+	g := newFakeGitLab(t)
+	g.enqueue(http.StatusOK, mrFixture)
+	g.enqueue(http.StatusOK, threeFilesFixture)
+	g.enqueue(http.StatusOK, "[]")
+	g.enqueue(http.StatusCreated, `{"id":1,"body":"summary"}`)
+
+	// Stage 3 LLM bodies — one per file.
+	l := newFakeLLM(t,
+		`{"findings":[],"summary":"a"}`,
+		`{"findings":[],"summary":"b"}`,
+		`{"findings":[],"summary":"c"}`,
+	)
+
+	glt, _ := gitlab.NewClient(g.URL, "test-token", gitlab.RetryConfig{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	p, _ := llm.NewOpenAIProvider(llm.OpenAIConfig{BaseURL: l.URL, APIKey: "k", Model: "m"})
+	r, err := NewReviewer(Config{
+		GitLab: glt, LLM: p, Model: "m",
+		MaxDiffBytes: 4096,
+		// MaxBatchBytes left at 0 (default).
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	if err != nil {
+		t.Fatalf("NewReviewer: %v", err)
+	}
+
+	if _, err := r.ReviewMR(context.Background(), "group/project", 42); err != nil {
+		t.Fatalf("ReviewMR: %v", err)
+	}
+
+	if got := l.calls.Load(); got != 4 {
+		t.Errorf("expected 4 LLM calls (3 per-chunk + 1 consolidate), got %d", got)
 	}
 }
 

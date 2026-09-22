@@ -37,6 +37,13 @@ type ReviewCmd struct {
 	// Diff / chunking.
 	MaxDiffBytes int `default:"200000" name:"max-diff-bytes" env:"MREVIEW_MAX_DIFF_BYTES" help:"Per-chunk byte budget; larger files return an error."`
 
+	// MaxBatchBytes is the byte budget for packing multiple
+	// chunks into a single LLM call. 0 = one chunk per call
+	// (default; one LLM call per file). Operators with large-
+	// context models should raise this — see README for the
+	// derivation formula from the model's context window.
+	MaxBatchBytes int `name:"max-batch-bytes" env:"MREVIEW_MAX_BATCH_BYTES" help:"Byte budget for packing multiple chunks into one LLM call. 0 (default) = one chunk per call. Raise for large-context models; the reduce of LLM calls can be significant on MRs with many small files."`
+
 	// Per-call timeout.
 	PerChunkTimeout time.Duration `default:"120s" name:"per-chunk-timeout" env:"MREVIEW_PER_CHUNK_TIMEOUT" help:"Per-LLM-call timeout."`
 
@@ -122,6 +129,7 @@ func runReview(stdout io.Writer, c *ReviewCmd, logger *slog.Logger) error {
 		LLM:                llmProvider,
 		Model:              c.Model,
 		MaxDiffBytes:       c.MaxDiffBytes,
+		MaxBatchBytes:      c.MaxBatchBytes,
 		Temperature:        c.Temperature,
 		MaxTokens:          c.MaxTokens,
 		PerChunkTimeout:    c.PerChunkTimeout,
