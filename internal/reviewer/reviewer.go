@@ -51,6 +51,20 @@ type Config struct {
 	// (the operator must split the MR manually).
 	MaxDiffBytes int
 
+	// MaxBatchBytes is the byte budget for packing multiple
+	// chunks into one LLM call. When > 0, the reviewer greedily
+	// groups consecutive chunks whose total size fits within this
+	// budget, reducing call count for operators with large-
+	// context models. When 0 (the default), each chunk gets its
+	// own LLM call (the historical behaviour).
+	//
+	// Operators with high-context models should set this to
+	// roughly (context_window_tokens - max_tokens -
+	// prompt_overhead) * bytes_per_token. A preset layer
+	// computing this from a declared context window is filed as
+	// a follow-up.
+	MaxBatchBytes int
+
 	// Categories, when non-empty, override the default set in
 	// the system prompt. Use to scope the review (e.g. security
 	// only).
@@ -281,7 +295,7 @@ func (r *Reviewer) ReviewMR(ctx context.Context, project string, iid int, action
 	// one chunk). Each call returns a ReviewResponse; we
 	// accumulate findings + summaries for the final merge.
 	chunkResponses := make([]llm.ReviewResponse, 0, len(chunks))
-	for idx, chunkBatch := range batchChunks(chunks) {
+	for idx, chunkBatch := range batchChunks(chunks, r.cfg.MaxBatchBytes) {
 		logger.Info("reviewing chunk batch", "batch", idx+1, "chunks", len(chunkBatch))
 
 		resp, err := r.reviewChunks(ctx, mr, chunkBatch)
@@ -499,19 +513,63 @@ func (r *Reviewer) consolidate(ctx context.Context, mr *gitlab.MergeRequest, chu
 	return parsed, nil
 }
 
-// batchChunks groups consecutive chunks into batches. For now we
-// put every chunk in its own batch (one call per chunk) — this
-// keeps the implementation simple and the prompts focused. Future
-// optimization: pack small chunks together when the sum fits.
-func batchChunks(chunks []llm.Chunk) [][]llm.Chunk {
+// batchChunks groups consecutive chunks into batches. When
+// maxBytes > 0, small chunks are greedily packed together as long
+// as the sum of their Size stays under maxBytes — this lets
+// operators with large-context models collapse N file-level
+// reviews into fewer LLM calls. When maxBytes <= 0, every chunk
+// gets its own batch (one call per chunk) — the historical
+// behaviour, preserved as the default for backwards compatibility.
+//
+// A single chunk larger than maxBytes is placed alone in its own
+// batch so it still gets reviewed; the LLM is the one that fails
+// if it can't fit, and that failure surfaces the same way as any
+// other chunk-level error.
+func batchChunks(chunks []llm.Chunk, maxBytes int) [][]llm.Chunk {
 	if len(chunks) == 0 {
 		return nil
 	}
-	out := make([][]llm.Chunk, len(chunks))
-	for i, c := range chunks {
-		out[i] = []llm.Chunk{c}
+	if maxBytes <= 0 {
+		// No packing: one batch per chunk (original behaviour).
+		out := make([][]llm.Chunk, len(chunks))
+		for i, c := range chunks {
+			out[i] = []llm.Chunk{c}
+		}
+		return out
 	}
-	return out
+	// Greedy pack: walk chunks in order, accumulate into the
+	// current batch until adding the next chunk would exceed
+	// maxBytes. Then flush and start a new batch. Ordering is
+	// preserved (chunks within a batch are in the same order as
+	// the input slice) so the LLM sees a coherent diff narrative.
+	var batches [][]llm.Chunk
+	var current []llm.Chunk
+	currentBytes := 0
+	for _, c := range chunks {
+		size := chunkBytes(c)
+		if len(current) > 0 && currentBytes+size > maxBytes {
+			batches = append(batches, current)
+			current = nil
+			currentBytes = 0
+		}
+		current = append(current, c)
+		currentBytes += size
+	}
+	if len(current) > 0 {
+		batches = append(batches, current)
+	}
+	return batches
+}
+
+// chunkBytes returns the budget contribution of one chunk. We use
+// Chunk.Size when populated (it's the canonical value set by
+// ChunkByFile / wrapDiffWithHeader) and fall back to len(Diff) for
+// chunks constructed by hand in tests.
+func chunkBytes(c llm.Chunk) int {
+	if c.Size > 0 {
+		return c.Size
+	}
+	return len(c.Diff)
 }
 
 // chunkFileList renders the file paths in a batch as a comma-
