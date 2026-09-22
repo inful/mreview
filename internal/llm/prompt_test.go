@@ -300,3 +300,28 @@ func TestBuildReviewPrompt_SystemOwnedAlwaysPresent(t *testing.T) {
 		}
 	}
 }
+
+// TestBuildReviewPrompt_RequiresFindingsOnSubstantiveDiff pins the
+// system-prompt rule removed in the issue #14 fix: the old wording
+// invited the LLM to emit an empty findings array when the MR was
+// "clean", which a 7B coder model took as permission to skip
+// findings entirely. The new wording requires at least one finding
+// (a single severity "info" observation is acceptable for a clean
+// diff).
+func TestBuildReviewPrompt_RequiresFindingsOnSubstantiveDiff(t *testing.T) {
+	system, _, err := BuildReviewPrompt(sampleMeta(), sampleChunks(), PromptOptions{})
+	if err != nil {
+		t.Fatalf("BuildReviewPrompt: %v", err)
+	}
+	// The new "must emit" instruction is present.
+	if !strings.Contains(system, "Do NOT emit an empty findings array") {
+		t.Errorf("system prompt missing the 'do not emit empty findings' rule; see issue #14")
+	}
+	if !strings.Contains(system, "severity \"info\"") {
+		t.Errorf("system prompt missing the severity 'info' fallback for clean diffs")
+	}
+	// The old "emit empty findings when clean" wording is gone.
+	if strings.Contains(system, "emit an empty findings array and a one-sentence \"LGTM\" summary") {
+		t.Errorf("old 'LGTM' empty-findings instruction still present; see issue #14")
+	}
+}

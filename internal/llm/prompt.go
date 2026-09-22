@@ -132,7 +132,9 @@ func buildSystemPrompt(categories []Category, suffix string) string {
 	b.WriteString("- Line numbers are 1-indexed and refer to the file at HEAD.\n")
 	b.WriteString("- severity \"error\" = blocker (do not merge). \"warning\" = must fix before merge. \"info\" = nit or suggestion.\n")
 	b.WriteString("- Be terse. One finding per real issue. Skip trivial style nits unless they obscure a real bug.\n")
-	b.WriteString("- If the MR is clean, emit an empty findings array and a one-sentence \"LGTM\" summary.\n")
+	b.WriteString("- Every finding must reference a specific file:line from the diff and explain a real issue or observation.\n")
+	b.WriteString("- Do NOT emit an empty findings array on a substantive diff — empty outputs give the developer nothing actionable.\n")
+	b.WriteString("- If the diff is genuinely clean, emit one finding with severity \"info\" describing what you reviewed (e.g. \"Read the full diff: no issues found\").\n")
 	b.WriteString("- Output the JSON object directly. Do NOT wrap it in ``` fences or preamble prose.\n")
 	if suffix = strings.TrimSpace(suffix); suffix != "" {
 		b.WriteString("\n# Team-specific guidance (operator-supplied)\n\n")
