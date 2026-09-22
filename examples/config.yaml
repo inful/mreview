@@ -1,0 +1,90 @@
+# mreview configuration.
+#
+# Load this file with:
+#     mreview --config=/etc/mreview/config.yaml review --repo=... --mr=...
+#     mreview --config=/etc/mreview/config.yaml serve --addr=...
+#
+# mreview also looks for this file at the default location
+# ~/.config/mreview/config.yaml when --config (and MREVIEW_CONFIG)
+# are unset.
+#
+# Behavior:
+#   - Values from this file populate env vars before flag parsing.
+#   - CLI flags always win over config values.
+#   - Secret fields (token_env, api_key_env, etc.) reference
+#     env-var NAMES — never store the secret itself in this file.
+#     The loader copies the value from the named env var into
+#     the env var the CLI flag expects (GITLAB_TOKEN, LLM_API_KEY,
+#     etc.) so the existing env:"" tag wiring keeps working.
+#
+# Schema mirrors every flag in `mreview {review,serve,doctor} --help`.
+
+gitlab:
+  # Base URL for the GitLab API. For self-hosted GitLab, point at
+  # your instance's /api/v4 root.
+  url: https://gitlab.com
+
+  # The token itself is NEVER stored in this file. Set GITLAB_TOKEN
+  # in the environment, or pass --gitlab-token at runtime.
+  #
+  # Required scope: api (full read/write).
+  token_env: GITLAB_TOKEN
+
+llm:
+  # OpenAI-compatible /v1 endpoint.
+  #   - Ollama:        http://localhost:11434/v1   (or just :11434; /v1 auto-appended)
+  #   - llama.cpp:     http://localhost:8080/v1
+  #   - LM Studio:     http://localhost:1234/v1
+  #   - vLLM:          http://localhost:8000/v1
+  base_url: http://localhost:11434/v1
+
+  # Bearer token. Most local servers accept any value or ignore
+  # the header entirely. Set when running against OpenAI proper.
+  api_key_env: LLM_API_KEY
+
+  # Model name. Must be available on the server (verify with
+  # `mreview doctor`).
+  model: qwen2.5-coder:7b
+
+review:
+  # Per-chunk byte budget. Files exceeding this return OversizedError
+  # and the operator must split the MR.
+  max_diff_bytes: 200000
+
+  # Per-LLM-call timeout.
+  per_chunk_timeout: 120s
+
+  # LLM sampling temperature (0.0 = deterministic, 2.0 = chaotic).
+  # Lower values produce more focused reviews; higher values surface
+  # more speculative findings.
+  temperature: 0.2
+
+  # LLM max output tokens per call.
+  max_tokens: 2048
+
+  # Bot username for the dedupe layer. When set, only the bot's
+  # prior comments count toward the fingerprint baseline; human
+  # comments are ignored. When empty, every existing comment is
+  # treated as a duplicate candidate (more conservative).
+  bot_username_env: GITLAB_BOT_USERNAME
+
+server:
+  # HTTP listen address for `mreview serve`.
+  addr: ":8080"
+
+  # Webhook shared secret. MUST match the "Secret token" field in
+  # the GitLab project's webhook settings.
+  webhook_secret_env: GITLAB_WEBHOOK_SECRET
+
+  # Worker pool queue depth. When the queue is full, incoming
+  # webhook events get HTTP 503 so GitLab retries later.
+  queue_size: 32
+
+  # Graceful shutdown drain timeout.
+  shutdown_timeout: 30s
+
+retry:
+  # GitLab API retry policy (transient errors only).
+  max_attempts: 4       # --retries + 1
+  initial_backoff: 500ms # --retry-backoff
+  max_backoff: 30s

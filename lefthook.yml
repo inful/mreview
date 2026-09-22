@@ -1,0 +1,18 @@
+# lefthook configuration
+# See https://github.com/evilmartians/lefthook
+#
+# Install: lefthook install
+# Run manually: lefthook run pre-commit
+#
+# Mirrors repo-mr-file's lefthook: parallel lint + race-enabled test on
+# every commit. Local gate; CI runs the same gates on every push.
+
+pre-commit:
+  parallel: true
+  commands:
+    lint:
+      glob: "*.go"
+      run: golangci-lint run
+    test:
+      glob: "*.go"
+      run: go test -race -count=1 ./...

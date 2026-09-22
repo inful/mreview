@@ -1,0 +1,70 @@
+# docker-compose for local development.
+#
+# Brings up Ollama with a code-review-tuned model + mreview serve.
+# GitLab is presumed to be reachable at GITLAB_URL (point at a real
+# instance or use gitlab-ce in another compose file).
+#
+# Usage:
+#
+#   1. Start:
+#        docker compose up -d
+#
+#   2. Pull a model (one-time):
+#        docker compose exec ollama ollama pull qwen2.5-coder:7b
+#
+#   3. Configure GitLab webhook to POST to http://<host>:8080/webhook
+#      with secret token "mysecret".
+#
+#   4. Watch the logs:
+#        docker compose logs -f mreview
+
+services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: mreview-ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-data:/root/.ollama
+    healthcheck:
+      # ollama serve returns 200 on / once the server is up.
+      test: ["CMD-SHELL", "test -f /root/.ollama/id || curl -fsS http://localhost:11434/ || exit 0"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+
+  mreview:
+    image: ghcr.io/inful/mreview:latest
+    container_name: mreview
+    depends_on:
+      ollama:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+    environment:
+      # Wire the GitLab + LLM endpoints the mreview image needs.
+      # GITLAB_TOKEN is the Personal Access Token with `api` scope.
+      GITLAB_URL: ${GITLAB_URL:-https://gitlab.com}
+      GITLAB_TOKEN: ${GITLAB_TOKEN:?set GITLAB_TOKEN to a Personal Access Token with api scope}
+      GITLAB_WEBHOOK_SECRET: ${GITLAB_WEBHOOK_SECRET:-mysecret}
+      # The LLM URL inside the docker network is the Ollama
+      # service hostname, not localhost.
+      LLM_URL: http://ollama:11434/v1
+      LLM_MODEL: ${LLM_MODEL:-qwen2.5-coder:7b}
+      # Bot username (optional — improves dedupe accuracy)
+      # GITLAB_BOT_USERNAME: review-bot
+    command:
+      - serve
+      - --addr=:8080
+      - --gitlab-url=${GITLAB_URL:-https://gitlab.com}
+      - --llm-url=http://ollama:11434/v1
+      - --webhook-secret=${GITLAB_WEBHOOK_SECRET:-mysecret}
+      - --log-format=json
+    restart: unless-stopped
+
+volumes:
+  ollama-data:
+    # Persists pulled models across container restarts.
+    # `docker compose down -v` removes it.

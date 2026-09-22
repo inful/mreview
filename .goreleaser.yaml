@@ -1,0 +1,107 @@
+# yaml-language-server: $schema=https://goreleaser.com/static/schema.json
+version: 2
+
+project_name: mreview
+
+before:
+  hooks:
+    # Run vet and the race-enabled test suite so a release is blocked
+    # if those gates ever drift into a non-green state.
+    - go mod tidy
+    - go vet ./...
+    - go test -race -count=1 -timeout 120s ./...
+
+builds:
+  - main: ./cmd/mreview
+    binary: mreview
+    id: mreview
+    env:
+      - CGO_ENABLED=0
+    flags:
+      # -trimpath strips the build-machine filesystem paths from the
+      # binary so the tool behaves identically regardless of who built
+      # it.
+      - -trimpath
+    ldflags:
+      # -s strips the symbol table; -w strips DWARF debug info.
+      # Combined: ~20 MB stripped binary (gitlab + openai-go dominate).
+      - -s -w
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ignore:
+      # windows/arm64 isn't generally usable; GitHub-hosted runners
+      # build it but the resulting binary is rare in the wild.
+      - goos: windows
+        goarch: arm64
+
+archives:
+  - id: default
+    formats: [tar.gz, zip]
+    # Archive name shape per platform.
+    name_template: >-
+      {{ .ProjectName }}_
+      {{- .Version }}_
+      {{- .Os }}_
+      {{- .Arch }}{{ if .Arm }}v{{ .Arm }}{{ end }}
+    files:
+      # Ship the README, LICENSE, and example configs inside each
+      # archive so downstream consumers get the docs with the
+      # binary.
+      - README.md
+      - LICENSE*
+      - examples/*.yaml
+      - examples/*.md
+
+checksum:
+  # The checksum file is included in the release as `checksums.txt` so
+  # consumers can verify the binary integrity with sha256sum.
+  name_template: '{{ .ProjectName }}_{{ .Version }}_checksums.txt'
+
+dockers_v2:
+  # Two image variants per release, identical to repo-mr-file:
+  #
+  #   :vX.Y.Z          — production, distroless static, ~5 MB
+  #   :vX.Y.Z-debug    — debug, distroless static-debug (busybox), ~6 MB
+  #
+  # The `-debug` suffix variant gives operators a shell inside the
+  # container for debugging without changing the binary or the
+  # ENTRYPOINT.
+  -
+    id: mreview
+    dockerfile: Dockerfile
+    platforms:
+      - linux/amd64
+      - linux/arm64
+    images:
+      - ghcr.io/inful/mreview
+    tags:
+      - latest
+      - '{{ .Version }}'
+    annotations:
+      org.opencontainers.image.title: mreview
+      org.opencontainers.image.description: Automated LLM merge-request reviews for GitLab.
+      org.opencontainers.image.url: https://github.com/inful/mreview
+      org.opencontainers.image.source: https://github.com/inful/mreview
+      org.opencontainers.image.licenses: AGPL-3.0-only
+  -
+    id: mreview-debug
+    dockerfile: Dockerfile.debug
+    platforms:
+      - linux/amd64
+      - linux/arm64
+    images:
+      - ghcr.io/inful/mreview
+    tags:
+      - latest-debug
+      - '{{ .Version }}-debug'
+    annotations:
+      org.opencontainers.image.title: mreview (debug)
+      org.opencontainers.image.description: mreview with busybox shell for debugging.
+      org.opencontainers.image.url: https://github.com/inful/mreview
+      org.opencontainers.image.source: https://github.com/inful/mreview
+      org.opencontainers.image.licenses: AGPL-3.0-only

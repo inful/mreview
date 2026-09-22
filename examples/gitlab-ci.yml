@@ -1,0 +1,63 @@
+# GitLab CI integration for `mreview review`
+#
+# Drop this snippet into your project's `.gitlab-ci.yml` to
+# trigger an `mreview review` on every MR open / reopen / push
+# event. This is the right integration for teams that prefer
+# CI-driven review over a long-running `mreview serve` process.
+#
+# The job uses GitLab's `rules` to fire on MR pipeline events
+# (web + push + reopen + update). It posts inline comments and a
+# summary thread to the same MR via the API token in
+# GITLAB_TOKEN_CI.
+#
+# Authentication: the job uses a CI job token by default
+# (CI_JOB_TOKEN). mreview expects a Personal Access Token; set
+# GITLAB_TOKEN_CI as a CI/CD variable (Project → Settings →
+# CI/CD → Variables, masked, protected) with `api` scope.
+
+mreview:
+  stage: review
+  image: ghcr.io/inful/mreview:latest
+  variables:
+    # Point mreview at the local LLM. In GitLab.com shared
+    # runners, localhost is the runner's loopback; for self-
+    # hosted runners, replace with your LLM host.
+    LLM_URL: http://localhost:11434/v1
+    LLM_MODEL: qwen2.5-coder:7b
+  rules:
+    # Run on MR open, reopen, and update.
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      exists:
+        # Skip if there's no diff (e.g. source branch == target
+        # branch because the MR was just opened with a squash
+        # placeholder commit).
+        paths:
+          - "**/*"
+  script:
+    - mreview review
+        --repo="$CI_PROJECT_PATH"
+        --mr="$CI_MERGE_REQUEST_IID"
+        --gitlab-url="$CI_SERVER_URL"
+        --gitlab-token="$GITLAB_TOKEN_CI"
+        --llm-url="$LLM_URL"
+        --llm-model="$LLM_MODEL"
+        --log-format=json
+  # Optional: allow the job to fail without blocking the pipeline.
+  # Comment out to make the pipeline fail when mreview fails.
+  allow_failure: true
+  # Resource hints. mreview is a single static binary — no
+  # special Kubernetes / Docker requirements.
+  tags:
+    - docker  # whatever your runner tag is
+
+# Optional: surface the bot's MR URL in the pipeline output so
+# the developer can click through to the review from the
+# pipeline view.
+mreview-summary:
+  stage: review
+  image: alpine:3
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+  script:
+    - echo "Review posted to $CI_MERGE_REQUEST_PROJECT_URL/-/merge_requests/$CI_MERGE_REQUEST_IID"
+  needs: ["mreview"]

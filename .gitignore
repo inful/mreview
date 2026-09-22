@@ -1,0 +1,22 @@
+# Build output
+dist/
+mreview
+*.exe
+
+# Test output
+coverage.out
+*.test
+
+# Local config / secrets
+.env
+.envrc
+config.local.yaml
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+.tokensave

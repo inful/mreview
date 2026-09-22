@@ -1,0 +1,57 @@
+# golangci-lint configuration for mreview.
+#
+# Mirrors the team's repo-mr-file config (inlined here so the project
+# is self-contained). Enable/disable lists kept short and intentional;
+# every linter enabled must justify its CPU cost on every commit.
+version: "2"
+
+linters:
+  default: standard
+  enable:
+    - bodyclose      # http body close: catches leaked response bodies
+    - copyloopvar    # Go 1.22+ loop var capture
+    - errorlint      # %w wrapping, errors.Is/As usage
+    - gocritic       # opinionated style + diagnostics
+    - nakedret       # naked returns in long funcs
+    - prealloc       # slice prealloc hints
+    - revive         # successor to golint
+    - usestdlibvars  # prefer stdlib consts/var over redeclaring
+  disable:
+    - cyclop         # cyclomatic complexity (gocognit overlaps)
+    - dupl           # duplicate code (over-eager on tests)
+    - exhaustruct    # constructor struct literal exhaustion
+    - funlen         # function length
+    - gocognit       # cognitive complexity
+    - goconst        # repeated string → constant
+    - lll            # line length
+    - varnamelen     # variable name length
+    - wsl            # whitespace style (gofmt is enough)
+
+  settings:
+    gocritic:
+      disabled-tags:
+        - diagnostic
+        - experimental
+        - performance
+      enabled-tags:
+        - style
+        - opinionated
+    revive:
+      rules:
+        - name: var-naming
+        - name: exported
+        - name: package-comments
+          disabled: true # package comments handled by linter; opt-out per file
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/inful/mreview
+
+exclusions:
+  default: false
+  rules: []

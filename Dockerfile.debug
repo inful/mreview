@@ -1,0 +1,18 @@
+# syntax=docker/dockerfile:1.7
+#
+# Debug image for mreview. Same binary as the production image, but
+# built on gcr.io/distroless/static:debug-nonroot which ships busybox.
+# Useful for `docker exec -it <container> /busybox/sh` debugging and
+# CI jobs that want ls/cat/env available alongside the binary.
+#
+# Multi-arch notes: see Dockerfile. The debug base image is also a
+# manifest list, so buildx pulls the right arch variant.
+
+FROM gcr.io/distroless/static:debug-nonroot AS runtime
+
+ARG TARGETPLATFORM
+COPY --chown=65532:65532 ${TARGETPLATFORM}/mreview /mreview
+
+# Same entrypoint as the production image — debug differs only by
+# having a shell available for exec.
+ENTRYPOINT ["/mreview"]

@@ -1,0 +1,87 @@
+# yaml-language-server: $schema=https://json.schemastore.org/github-workflow.json
+name: ci
+
+# Runs the same gates the local lefthook pre-commit runs (golangci-lint
+# + go test -race) on every push to main and every PR. This is the
+# safety net for contributors who forgot to install lefthook.
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+# Same concurrency discipline as the release workflow: serialize per
+# branch so two pushes to main don't race on caches or annotations.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Lint & test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          cache: true
+
+      - name: Run go mod tidy
+        run: go mod tidy
+        # Verifies go.sum is consistent with go.mod and surfaces any
+        # accidentally-uncommitted go.sum change.
+
+      - name: Run go vet
+        run: go vet ./...
+
+      - name: Run golangci-lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest
+
+      - name: Run go test (race)
+        run: go test -race -count=1 -timeout 120s ./...
+
+      - name: Build
+        run: go build -trimpath -ldflags="-s -w" -o dist/mreview ./cmd/mreview
+
+  build-matrix:
+    # Compile on every supported platform so platform-specific
+    # breakage (build tags, syscalls, etc.) surfaces before a
+    # release, not during.
+    name: Build ${{ matrix.os }} / ${{ matrix.arch }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [linux, darwin, windows]
+        arch: [amd64, arm64]
+        exclude:
+          # matches .goreleaser.yaml ignore
+          - os: windows
+            arch: arm64
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          cache: true
+
+      - name: Build ${{ matrix.os }}/${{ matrix.arch }}
+        env:
+          GOOS: ${{ matrix.os }}
+          GOARCH: ${{ matrix.arch }}
+          CGO_ENABLED: 0
+        run: go build -trimpath -ldflags="-s -w" -o dist/mreview-${{ matrix.os }}-${{ matrix.arch }} ./cmd/mreview

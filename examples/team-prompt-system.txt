@@ -1,0 +1,43 @@
+# Team-specific prompt text — system side
+#
+# mreview layers this text ONTO the system-owned prompt. The
+# system-owned prefix (JSON schema, output rules, severity
+# semantics, "don't wrap in fences") is always present and
+# cannot be disabled — your text is appended, not a replacement.
+#
+# Use this file for things that should apply to EVERY review this
+# bot runs:
+#   - Project conventions and style guide
+#   - Preferred / forbidden dependencies
+#   - Severity semantics you want the model to apply
+#   - Documentation standards
+#
+# DO NOT put per-MR context here — that's what
+# `user-prompt-file` is for.
+
+We are the AcmeCorp platform team.
+
+Project conventions:
+- Errors wrap with %w and a short verb-prefix ("read x: %w").
+- Tables drive tests when possible.
+- Public APIs have godoc; internal helpers don't need it.
+- No new third-party dependencies without an ADR in docs/adrs/.
+
+Dependency preferences:
+- HTTP → stdlib net/http (not gin, not echo).
+- Postgres → jackc/pgx (not database/sql, not gorm).
+- JSON → encoding/json (not gjson, not json-iterator).
+- Logging → log/slog (not zap, not logrus).
+
+Severity semantics we use:
+- "error"   → must block merge. Security holes, data loss, broken
+              contracts.
+- "warning" → should fix before merge but won't block. Naming, minor
+              perf, missing tests for new code paths.
+- "info"    → nit. Suggestion-only; the human can ignore.
+
+Documentation standards:
+- Every exported package has a doc.go with a one-paragraph overview.
+- Every exported function/type in an internal package has at least
+  one sentence of godoc describing intent (not mechanics).
+- Comments explain WHY, not WHAT.
