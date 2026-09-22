@@ -44,7 +44,9 @@ jobs:
         run: go vet ./...
 
       - name: Run golangci-lint
-        uses: golangci/golangci-lint-action@v6
+        # v7 is required for golangci-lint v2.x configs (v6 only
+        # supports v1.x formats).
+        uses: golangci/golangci-lint-action@v7
         with:
           # Pin a specific version that's built with Go ≥ 1.26
           # (the project's go.mod target). The action's default
