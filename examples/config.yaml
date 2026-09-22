@@ -88,3 +88,29 @@ retry:
   max_attempts: 4       # --retries + 1
   initial_backoff: 500ms # --retry-backoff
   max_backoff: 30s
+
+# Per-LLM model presets. When the running --model matches an entry
+# in llm_preset_by_model, the named preset's context_window drives
+# the derived --max-batch-bytes value, and per_chunk_timeout takes
+# effect when the CLI flag isn't set. This lets one config serve
+# multiple models without per-invocation flag wrangling.
+#
+# The byte budget is derived as:
+#   max_batch_bytes = (context_window - 1500 - max_tokens - 15% safety) * 4
+#
+# CLI flags always win; presets fill in when CLI values are unset.
+# Lookup is strict (exact model name match), no prefix magic.
+llm_presets:
+  # 168k-context local model. Derives ~520 KB packing budget.
+  opus-local:
+    context_window: 168000
+    per_chunk_timeout: 15m
+
+  # 80k-context model. Derives ~228 KB packing budget.
+  gemma-26b-e4b:
+    context_window: 80000
+    per_chunk_timeout: 5m
+
+llm_preset_by_model:
+  "qwen2.5-coder:7b": opus-local
+  "gemma-26b-e4b":    gemma-26b-e4b

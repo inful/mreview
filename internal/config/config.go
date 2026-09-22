@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -33,6 +34,18 @@ type File struct {
 	Review ReviewConfig `yaml:"review"`
 	Server ServerConfig `yaml:"server"`
 	Retry  RetryConfig  `yaml:"retry"`
+
+	// LLMPresets is an optional map of model-name → preset. The
+	// cmd layer uses ApplyPreset(model) to derive a packing
+	// budget and per-chunk timeout when the operator hasn't
+	// supplied explicit CLI/env values.
+	LLMPresets map[string]LLMPreset `yaml:"llm_presets,omitempty"`
+
+	// LLMPresetByModel is an optional map of LLM model identifier
+	// → preset name. When `--model` matches an entry, the named
+	// preset from LLMPresets is applied. Strict lookup only — no
+	// prefix matching, no heuristics.
+	LLMPresetByModel map[string]string `yaml:"llm_preset_by_model,omitempty"`
 }
 
 // GitLabConfig holds GitLab API connection settings.
@@ -209,7 +222,106 @@ func MustEnv(name string) (string, error) {
 }
 
 // ErrNotFound is returned when the path argument is empty AND
-// the caller requires a config file. Kept separate so callers
-// can distinguish "no file specified" (use defaults) from
+// the caller requires a config file. Kept separate so callers can
+// distinguish "no file specified" (use defaults) from
 // "file specified but missing" (error).
 var ErrNotFound = errors.New("config: file not specified")
+
+// LLMPreset declares the runtime characteristics of one LLM model
+// that the reviewer needs to size its work. The operator supplies
+// the model context window (in tokens); everything else
+// (max_batch_bytes) is derived from it.
+type LLMPreset struct {
+	// ContextWindow is the model's max context length in tokens.
+	// Required.
+	ContextWindow int `yaml:"context_window"`
+
+	// PerChunkTimeout is the per-LLM-call timeout. Duration
+	// string ("15m", "5m") — string for yaml.v3 round-trip
+	// compatibility; parsed on use. Defaults to "15m" when
+	// empty.
+	PerChunkTimeout string `yaml:"per_chunk_timeout"`
+}
+
+// Derivation constants for MaxBatchBytes. Tuned for source-code
+// review: most LLMs use BPE tokenizers where ~4 bytes ≈ 1 token
+// for code. The 15% safety margin absorbs tokenizer variance (the
+// real ratio can be 3-5 bytes/token) and per-request overhead the
+// packer can't predict (JSON encoding, message framing, etc.).
+//
+// Operators who find these too conservative or too generous can
+// override via the --max-batch-bytes CLI flag — that's an explicit
+// escape hatch and the derivation is logged when it fires so the
+// operator can see what the system computed.
+const (
+	PromptOverheadTokens = 1500 // system prompt + MR header + JSON envelope
+	BytesPerToken        = 4    // BPE assumption for source code
+	SafetyMarginFraction = 0.15 // 15% buffer for tokenizer variance
+)
+
+// DeriveMaxBatchBytes computes the byte budget for packing
+// multiple chunks into one LLM call, given the model's max context
+// window and the caller's max output budget.
+//
+// Returns 0 when the configuration is infeasible (context window
+// too small for the requested output) — callers should treat 0 as
+// "disable packing."
+func DeriveMaxBatchBytes(contextWindow, maxTokens int) int {
+	if contextWindow <= 0 {
+		return 0
+	}
+	safety := int(float64(contextWindow) * SafetyMarginFraction)
+	usable := contextWindow - PromptOverheadTokens - maxTokens - safety
+	if usable <= 0 {
+		return 0
+	}
+	return usable * BytesPerToken
+}
+
+// ApplyPreset looks up the preset for modelName and returns its
+// name and parsed values. Returns ("", LLMPreset{}, false) when
+// no preset matches — callers should fall back to defaults and
+// log a warning so the operator knows packing is disabled.
+//
+// Nil-safe: a nil receiver returns ok=false (no preset). This
+// matters because cmd/mreview passes a nil *File when no config
+// file was supplied.
+//
+// Lookup is strict: the modelName must appear as a key in
+// LLMPresetByModel, and the named preset must exist in LLMPresets.
+// No prefix matching; an unmatched model gets no preset.
+func (f *File) ApplyPreset(modelName string) (string, LLMPreset, bool) {
+	if f == nil {
+		return "", LLMPreset{}, false
+	}
+	if len(f.LLMPresetByModel) == 0 || len(f.LLMPresets) == 0 {
+		return "", LLMPreset{}, false
+	}
+	name, ok := f.LLMPresetByModel[modelName]
+	if !ok {
+		return "", LLMPreset{}, false
+	}
+	p, ok := f.LLMPresets[name]
+	if !ok {
+		// Misconfigured: model → preset name, but no preset
+		// with that name. Don't silently disable; return the
+		// name so the caller can log it loudly.
+		return name, LLMPreset{}, false
+	}
+	return name, p, true
+}
+
+// ParsePresetTimeout returns the preset's per-chunk timeout as a
+// time.Duration. Falls back to 15m when the field is empty or
+// unparseable (the historical default from CLI flags). Invalid
+// strings are returned as (15m, false) so the caller can log.
+func ParsePresetTimeout(s string) (time.Duration, bool) {
+	if s == "" {
+		return 15 * time.Minute, false
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil {
+		return 15 * time.Minute, false
+	}
+	return d, true
+}

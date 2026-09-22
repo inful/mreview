@@ -61,8 +61,10 @@ func run(parentCtx context.Context, args []string, stdout, stderr io.Writer) (ex
 	// the config file BEFORE kong parses. This lets config values
 	// populate env vars that kong's env:"" tags resolve against.
 	cfgPath := preScanConfigPath(args)
+	var cfg *config.File
 	if cfgPath != "" {
-		cfg, cfgErr := config.Load(cfgPath)
+		var cfgErr error
+		cfg, cfgErr = config.Load(cfgPath)
 		if cfgErr != nil {
 			_, _ = fmt.Fprintln(stderr, cfgErr.Error())
 			return ExitConfig
@@ -118,9 +120,9 @@ func run(parentCtx context.Context, args []string, stdout, stderr io.Writer) (ex
 
 	switch ctx.Command() {
 	case "review":
-		return exitCodeFromError(runReview(stdout, cli.Review, logger))
+		return exitCodeFromError(runReview(stdout, cli.Review, cfg, logger))
 	case "serve":
-		return exitCodeFromError(runServe(parentCtx, stdout, cli.Serve, logger))
+		return exitCodeFromError(runServe(parentCtx, stdout, cli.Serve, cfg, logger))
 	case "doctor":
 		return exitCodeFromError(runDoctor(stdout, cli.Doctor, logger))
 	default:
