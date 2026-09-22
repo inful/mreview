@@ -8,6 +8,22 @@ After v0.1.0, entries are generated from conventional commits by
 GoReleaser. The hand-written entries below document the initial
 release.
 
+## [0.4.0]
+
+### Added
+
+- **`max_batch_bytes` field on `LLMPreset`** (#24). Operators whose
+  models have an effective context smaller than their advertised
+  window (common for heavily quantized local models) can now tune
+  the per-call packing budget directly in YAML instead of relying
+  on the derivation from `context_window`. A model that returns
+  empty content on a packed batch (rather than timing out) — the
+  classic "prompt technically fits but the model gives up" pattern
+  — can now be configured with a smaller preset value. Three-layer
+  precedence: CLI flag > preset field > derived from
+  `context_window`. The shipped `coding-agent` preset now carries
+  the new field.
+
 ## [0.3.1]
 
 ### Fixed
@@ -202,7 +218,8 @@ The AGPL network clause applies: anyone running a modified
 mreview as a service that others interact with over a network
 must provide the source of their modifications to those users.
 
-[Unreleased]: https://github.com/inful/mreview/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/inful/mreview/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/inful/mreview/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/inful/mreview/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/inful/mreview/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/inful/mreview/compare/v0.1.0...v0.2.0
