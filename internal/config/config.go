@@ -241,6 +241,13 @@ type LLMPreset struct {
 	// compatibility; parsed on use. Defaults to "15m" when
 	// empty.
 	PerChunkTimeout string `yaml:"per_chunk_timeout"`
+
+	// ReasoningEffort is the model's reasoning budget
+	// ("low"/"medium"/"high"). Empty means "use the server's
+	// default". Only honoured by reasoning-capable models
+	// (OpenAI o-series, Azure AI Foundry, Groq, Together, etc.);
+	// providers that don't support the field ignore it.
+	ReasoningEffort string `yaml:"reasoning_effort,omitempty"`
 }
 
 // Derivation constants for MaxBatchBytes. Tuned for source-code

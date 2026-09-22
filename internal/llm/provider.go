@@ -44,13 +44,14 @@ type Provider interface {
 
 // ChatRequest is the platform-neutral input to Provider.Chat.
 type ChatRequest struct {
-	System         string         // system prompt (or empty)
-	User           string         // user prompt (or empty)
-	Model          string         // model name (e.g. "qwen2.5-coder:7b")
-	Temperature    float64        // 0.0–2.0; 0 means use server default
-	MaxTokens      int            // upper bound; 0 means use server default
-	ResponseFormat ResponseFormat // JSON object mode, or text mode
-	Timeout        time.Duration  // per-request; 0 means no override
+	System          string          // system prompt (or empty)
+	User            string          // user prompt (or empty)
+	Model           string          // model name (e.g. "qwen2.5-coder:7b")
+	Temperature     float64         // 0.0–2.0; 0 means use server default
+	MaxTokens       int             // upper bound; 0 means use server default
+	ResponseFormat  ResponseFormat  // JSON object mode, or text mode
+	ReasoningEffort ReasoningEffort // o-series-style reasoning budget; "" means server default
+	Timeout         time.Duration   // per-request; 0 means no override
 }
 
 // ResponseFormat asks the model to constrain its output.
@@ -99,6 +100,30 @@ const (
 	// SeverityError marks a blocker (broken behaviour, security
 	// hole).
 	SeverityError Severity = "error"
+)
+
+// ReasoningEffort controls how much "thinking" a reasoning-capable
+// model (OpenAI o-series, Azure AI Foundry, Groq, Together, etc.)
+// spends before producing an answer. Higher effort is more thorough
+// but slower and more expensive. Local non-reasoning models and
+// non-supporting providers ignore the parameter; sending it has no
+// effect on those.
+//
+// The empty string is the "don't set" sentinel — providers will use
+// the server's default reasoning budget (typically "medium" on
+// OpenAI's o-series).
+type ReasoningEffort string
+
+const (
+	// ReasoningEffortLow biases the model toward fast, cheap answers.
+	ReasoningEffortLow ReasoningEffort = "low"
+	// ReasoningEffortMedium is the OpenAI default for o-series
+	// models — balanced cost vs thoroughness.
+	ReasoningEffortMedium ReasoningEffort = "medium"
+	// ReasoningEffortHigh pushes the model to think longer; expect
+	// better answers on hard problems at the cost of latency and
+	// tokens used on reasoning.
+	ReasoningEffortHigh ReasoningEffort = "high"
 )
 
 // Category is a coarse label the LLM assigns to each finding. The

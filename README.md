@@ -181,7 +181,12 @@ Flags:
       --model="qwen2.5-coder:7b"                  LLM model name ($LLM_MODEL).
       --temperature=0.2                           LLM sampling temperature.
       --max-tokens=2048                           LLM max output tokens per call.
+      --reasoning-effort=STRING                    Reasoning budget for o-series-style models:
+                                                  'low' / 'medium' / 'high'. Empty = server default.
+                                                  No-op for models that don't support the field.
       --max-diff-bytes=200000                     Per-chunk byte budget.
+      --max-batch-bytes=INT                       Byte budget for packing multiple chunks into one
+                                                  LLM call. 0 (default) = one chunk per call.
       --per-chunk-timeout=2m0s                    Per-LLM-call timeout.
       --bot-username=STRING                       Bot username for dedupe ($GITLAB_BOT_USERNAME).
       --retries=3                                 GitLab API retry attempts on transient errors.
@@ -417,10 +422,15 @@ llm_presets:
   gemma-26b-e4b:
     context_window: 80000
     per_chunk_timeout: 5m
+  o-series:
+    context_window: 200000
+    per_chunk_timeout: 15m
+    reasoning_effort: high
 
 llm_preset_by_model:
   "qwen2.5-coder:7b": opus-local
   "gemma-26b-e4b":    gemma-26b-e4b
+  "o3-mini":          o-series
 ```
 
 When `--model=qwen2.5-coder:7b` matches, mreview derives
@@ -435,14 +445,22 @@ The byte budget is derived as:
 max_batch_bytes = (context_window - 1500 - max_tokens - 15% safety) × 4 bytes/token
 ```
 
-CLI flags (`--max-batch-bytes`, `--per-chunk-timeout`) always win
-when set; the preset fills in the gaps. When a preset applies,
-you'll see log lines like:
+CLI flags (`--max-batch-bytes`, `--per-chunk-timeout`,
+`--reasoning-effort`) always win when set; the preset fills in the
+gaps. When a preset applies, you'll see log lines like:
 
 ```
-INFO LLM preset applied preset=opus-local model=qwen2.5-coder:7b context_window=168000
+INFO LLM preset applied                 preset=opus-local model=qwen2.5-coder:7b context_window=168000
 INFO max_batch_bytes derived from preset preset=opus-local context_window=168000 max_tokens=8192 max_batch_bytes=532432
+INFO reasoning_effort from preset        preset=o-series reasoning_effort=high
 ```
+
+The optional `reasoning_effort` field on a preset (or the matching
+`--reasoning-effort` CLI flag) controls the reasoning budget for
+o-series-style models — OpenAI's o1/o3, Azure AI Foundry, Groq,
+Together, and any other provider that proxies them. Allowed
+values are `low`, `medium`, `high`. Local non-reasoning models and
+non-supporting providers ignore the field on the wire.
 
 ## Customizing the prompts
 

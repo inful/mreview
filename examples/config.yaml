@@ -111,6 +111,16 @@ llm_presets:
     context_window: 80000
     per_chunk_timeout: 5m
 
+  # Reasoning-capable model. The reasoning_effort field is
+  # forwarded to the OpenAI-compatible endpoint as
+  # `reasoning_effort: high` (no-op for providers / models that
+  # don't honour the field).
+  o-series:
+    context_window: 200000
+    per_chunk_timeout: 15m
+    reasoning_effort: high
+
 llm_preset_by_model:
   "qwen2.5-coder:7b": opus-local
   "gemma-26b-e4b":    gemma-26b-e4b
+  "o3-mini":          o-series
