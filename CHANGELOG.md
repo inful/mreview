@@ -8,6 +8,23 @@ After v0.1.0, entries are generated from conventional commits by
 GoReleaser. The hand-written entries below document the initial
 release.
 
+## [0.3.1]
+
+### Fixed
+
+- **Inline discussion posts on the right side of the diff.** mreview
+  was sending `old_path: ""` and `old_line: 0` unconditionally, which
+  GitLab's `/discussions` endpoint rejects with a generic 500 (the
+  diff-line lookup fails when asked to anchor to old line 0). The
+  summary endpoint doesn't take a position so it kept posting fine
+  while every inline comment was lost. The reviewer now constructs
+  the position per file status: new files send `new_path +
+  new_line`, modified files do the same (with `old_path` only when
+  renamed), and deleted files send `old_path + old_line`. Fields
+  that don't apply are omitted from the request body entirely
+  (nil pointers + `omitempty`), so GitLab sees exactly the shape
+  the API docs describe. (#23)
+
 ## [0.3.0]
 
 ### Added
@@ -185,7 +202,8 @@ The AGPL network clause applies: anyone running a modified
 mreview as a service that others interact with over a network
 must provide the source of their modifications to those users.
 
-[Unreleased]: https://github.com/inful/mreview/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/inful/mreview/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/inful/mreview/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/inful/mreview/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/inful/mreview/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/inful/mreview/releases/tag/v0.1.0
