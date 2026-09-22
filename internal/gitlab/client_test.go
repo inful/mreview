@@ -187,6 +187,36 @@ func TestFetchMR_Success(t *testing.T) {
 	}
 }
 
+// TestFetchMR_NumericProjectID verifies that passing a numeric
+// project ID (instead of a slug path) flows through to the
+// underlying client-go call unmodified. This is the documented
+// workaround for GitLab instances where the /discussions endpoint
+// mis-parses URL-encoded project paths but handles numeric IDs
+// cleanly. See the README troubleshooting section.
+func TestFetchMR_NumericProjectID(t *testing.T) {
+	stub := newGitlabStub(t)
+	stub.enqueue(http.StatusOK, mrFixture)
+	c := newTestClient(t, stub.URL)
+
+	// Pass "12345" (numeric) instead of "group/project" (slug).
+	// client-go accepts `pid any`; mreview must not transform it.
+	_, err := c.FetchMR(context.Background(), "12345", 42)
+	if err != nil {
+		t.Fatalf("FetchMR: %v", err)
+	}
+
+	if len(stub.requests) != 1 {
+		t.Fatalf("expected 1 request, got %d", len(stub.requests))
+	}
+	// The stub records the path the upstream library actually
+	// sent. With a numeric ID, client-go builds /projects/12345/...
+	// (no URL encoding, no slashes to escape). This is what we want.
+	if stub.requests[0].Path != "/api/v4/projects/12345/merge_requests/42" {
+		t.Errorf("path = %q; want /api/v4/projects/12345/merge_requests/42 (no URL encoding)",
+			stub.requests[0].Path)
+	}
+}
+
 func TestFetchMR_AuthError(t *testing.T) {
 	stub := newGitlabStub(t)
 	stub.enqueue(http.StatusUnauthorized, `{"message":"401 Unauthorized"}`)
