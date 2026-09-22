@@ -21,7 +21,7 @@ import (
 // GITLAB_TOKEN) so the binary can be used from CI / cron without
 // exposing secrets on the command line.
 type ReviewCmd struct {
-	Repo string `required:"" help:"Repository path (group/project)."`
+	Repo string `required:"" help:"Repository path (group/project) or numeric project ID. Numeric IDs bypass any GitLab-side quirks with URL-encoded project paths in the discussions endpoint; find the ID via Settings → General or /api/v4/projects?search=<slug>."`
 	MR   int    `required:"" name:"mr" help:"Merge request IID."`
 
 	// GitLab connection.

@@ -784,6 +784,39 @@ GitLab returned 5xx three times in a row (default retry count). Check
 GitLab's status page and your local network. The review can be retried
 manually with the same `mreview review` command.
 
+### Inline discussion posts fail (500 from `/discussions`) while summary notes post fine
+
+Some GitLab instances have a parser quirk on `/discussions` that
+trips on URL-encoded project paths (the slashes get re-encoded as
+`%2F` on the wire). The summary endpoint (`/notes`) doesn't hit
+the same code path, so the summary posts but every inline
+discussion gets a 500.
+
+Workaround: use the **numeric project ID** instead of the slug path.
+mreview passes the value through to `gitlab-org/api/client-go`,
+which accepts either format — no code change on either side.
+
+```bash
+# Find the ID once:
+curl -sS -H "PRIVATE-TOKEN: $GITLAB_TOKEN" \
+  "https://gitlab.example.com/api/v4/projects?search=group/project" \
+  | jq '.[0].id'
+# 12345
+
+# Then invoke with the ID:
+mreview review --repo=12345 --mr=42
+```
+
+The numeric ID is sent as `/projects/12345/...` (no encoding),
+which sidesteps the path-parser quirk on the affected GitLab
+versions. Validated by `TestFetchMR_NumericProjectID` in
+`internal/gitlab/client_test.go`.
+
+If you can't use a numeric ID for some reason (e.g. the webhook
+payload from `mreview serve` carries the slug and you can't
+control that), the durable fix is on the GitLab side: upgrade or
+patch the GitLab instance.
+
 ### "list models: ..." or "ping: ..." failures in `mreview doctor`
 
 The LLM endpoint isn't reachable. For Ollama: ensure `ollama serve` is
