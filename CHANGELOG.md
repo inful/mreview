@@ -8,6 +8,18 @@ After v0.1.0, entries are generated from conventional commits by
 GoReleaser. The hand-written entries below document the initial
 release.
 
+## [0.3.0]
+
+### Added
+
+- **`reasoning_effort` parameter for o-series models** (#21). New
+  `--reasoning-effort` flag (`low` / `medium` / `high`) and a
+  matching `reasoning_effort` field on `llm_presets.<name>` so
+  reasoning-capable models (OpenAI o1/o3, Azure AI Foundry, Groq,
+  Together, etc.) take the budget the operator specifies. Local
+  non-reasoning models and non-supporting providers ignore the
+  parameter on the wire; existing users see no change.
+
 ## [0.2.0]
 
 ### Fixed
@@ -173,6 +185,7 @@ The AGPL network clause applies: anyone running a modified
 mreview as a service that others interact with over a network
 must provide the source of their modifications to those users.
 
-[Unreleased]: https://github.com/inful/mreview/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/inful/mreview/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/inful/mreview/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/inful/mreview/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/inful/mreview/releases/tag/v0.1.0
