@@ -1,6 +1,7 @@
 package reviewer
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -832,3 +833,95 @@ func TestBatchChunks(t *testing.T) {
 // silence unused-import warning for json in case future tests
 // use it.
 var _ = json.Marshal
+
+// substantiveDiffFixture is a diff with enough changed lines to
+// cross the zero-findings sanity-check threshold (>10 lines). It
+// pretends to update a config file across many lines so the test
+// can verify the reviewer WARNs when the LLM emits no findings on
+// a non-trivial diff (see issue #14).
+const substantiveDiffFixture = `[{"old_path":"config.yaml","new_path":"config.yaml","new_file":false,"deleted_file":false,"renamed_file":false,"diff":"@@ -1,20 +1,20 @@\n-alpha\n-beta\n-gamma\n-delta\n-epsilon\n-zeta\n-eta\n-theta\n-iota\n-kappa\n-lambda\n-mu\n-nu\n-xi\n-omicron\n-pi\n-rho\n-sigma\n-tau\n-upsilon\n+ALPHA\n+BETA\n+GAMMA\n+DELTA\n+EPSILON\n+ZETA\n+ETA\n+THETA\n+IOTA\n+KAPPA\n+LAMBDA\n+MU\n+NU\n+XI\n+OMICRON\n+PI\n+RHO\n+SIGMA\n+TAU\n+UPSILON\n"}]`
+
+// TestReviewMR_ZeroFindings_WarnsOnSubstantiveDiff confirms that a
+// non-trivial diff (more than 10 changed lines) producing an empty
+// findings array from the LLM triggers a WARN log line. This makes
+// the failure mode from issue #14 impossible to miss in default-
+// verbosity runs.
+func TestReviewMR_ZeroFindings_WarnsOnSubstantiveDiff(t *testing.T) {
+	g := newFakeGitLab(t)
+	g.enqueue(http.StatusOK, mrFixture)
+	g.enqueue(http.StatusOK, substantiveDiffFixture)
+	g.enqueue(http.StatusOK, "[]") // ListDiscussions: empty
+	g.enqueue(http.StatusCreated, `{"id":1,"body":"summary","author":{"id":1,"username":"bot"},"system":false}`)
+
+	// LLM returns the regressed "looks clean" output: prose-style
+	// summary, no findings. This is exactly what the user's MR
+	// review produced before the fix.
+	l := newFakeLLM(t,
+		`{"findings":[],"summary":"The diff looks fine to me."}`,
+	)
+
+	var logBuf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	glt, _ := gitlab.NewClient(g.URL, "test-token", gitlab.RetryConfig{
+		MaxAttempts:    2,
+		InitialBackoff: 1 * time.Millisecond,
+		MaxBackoff:     5 * time.Millisecond,
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	p, _ := llm.NewOpenAIProvider(llm.OpenAIConfig{BaseURL: l.URL, APIKey: "k", Model: "m"})
+	r, err := NewReviewer(Config{
+		GitLab: glt, LLM: p, Model: "m", MaxDiffBytes: 4096,
+		Logger: logger,
+	})
+	if err != nil {
+		t.Fatalf("NewReviewer: %v", err)
+	}
+
+	if _, err := r.ReviewMR(context.Background(), "group/project", 42); err != nil {
+		t.Fatalf("ReviewMR: %v", err)
+	}
+
+	logs := logBuf.String()
+	if !strings.Contains(logs, "level=WARN") {
+		t.Errorf("expected a WARN log line, got:\n%s", logs)
+	}
+	if !strings.Contains(logs, "LLM returned no findings on a non-trivial diff") {
+		t.Errorf("expected the zero-findings warn message, got:\n%s", logs)
+	}
+	// The warn should carry the diff size so operators can judge
+	// whether to retry with a bigger model.
+	if !strings.Contains(logs, "diff_lines=") {
+		t.Errorf("expected diff_lines=<n> in the warn log, got:\n%s", logs)
+	}
+}
+
+// TestReviewMR_ZeroFindings_NoWarnOnSmallDiff confirms the sanity
+// check does NOT fire for small diffs (≤10 lines). A 3-line typo
+// fix with no findings is normal and shouldn't pollute logs.
+func TestReviewMR_ZeroFindings_NoWarnOnSmallDiff(t *testing.T) {
+	g := newFakeGitLab(t)
+	g.enqueue(http.StatusOK, mrFixture)
+	g.enqueue(http.StatusOK, changesFixture) // 3-line diff
+	g.enqueue(http.StatusOK, "[]")
+	g.enqueue(http.StatusCreated, `{"id":1,"body":"s"}`)
+
+	l := newFakeLLM(t, `{"findings":[],"summary":"tiny fix, looks good"}`)
+
+	var logBuf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	glt, _ := gitlab.NewClient(g.URL, "test-token", gitlab.RetryConfig{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	p, _ := llm.NewOpenAIProvider(llm.OpenAIConfig{BaseURL: l.URL, APIKey: "k", Model: "m"})
+	r, _ := NewReviewer(Config{
+		GitLab: glt, LLM: p, Model: "m", MaxDiffBytes: 4096,
+		Logger: logger,
+	})
+
+	if _, err := r.ReviewMR(context.Background(), "group/project", 42); err != nil {
+		t.Fatalf("ReviewMR: %v", err)
+	}
+
+	if strings.Contains(logBuf.String(), "LLM returned no findings") {
+		t.Errorf("small diff should not trigger the zero-findings warn, got:\n%s", logBuf.String())
+	}
+}

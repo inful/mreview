@@ -304,6 +304,22 @@ func (r *Reviewer) ReviewMR(ctx context.Context, project string, iid int, action
 		return nil, fmt.Errorf("reviewer: consolidate: %w", err)
 	}
 
+	// Sanity-check the LLM output: a non-trivial diff that
+	// produces zero findings almost always means the model
+	// regressed to "LGTM" instead of reviewing. Surface it as a
+	// loud WARN so operators running at default verbosity notice.
+	// (See issue #14 — the system prompt used to invite this
+	// pattern; the prompt now requires at least one finding, but
+	// local LLMs still sometimes produce empty outputs.)
+	if len(final.Findings) == 0 {
+		if totalLines := countDiffLines(changes); totalLines > 10 {
+			logger.Warn("LLM returned no findings on a non-trivial diff",
+				"files", len(changes),
+				"diff_lines", totalLines,
+			)
+		}
+	}
+
 	// Filter findings whose file paths don't appear in the diff
 	// (LLM hallucination guard) and drop the rest through the
 	// GitLab poster.
@@ -499,6 +515,21 @@ func pathIndex(changes []gitlab.ChangeFile) map[string]bool {
 		out[c.Path()] = true
 	}
 	return out
+}
+
+// countDiffLines returns the total number of newline characters
+// across all change diffs. Used to decide whether the LLM's zero
+// findings output is suspicious — a "looks clean" reply on a
+// 5-line diff is normal; on a 500-line diff it's almost always a
+// regression. Newlines are a cheap, format-agnostic proxy for diff
+// size; counting `+` / `-` lines would require parsing and isn't
+// worth it for a sanity check.
+func countDiffLines(changes []gitlab.ChangeFile) int {
+	n := 0
+	for _, c := range changes {
+		n += strings.Count(c.Diff, "\n")
+	}
+	return n
 }
 
 // filterFindings drops findings that:
