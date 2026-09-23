@@ -275,7 +275,10 @@ func extractFenced(raw, lang string) string {
 	rest = rest[nl+1:]
 
 	if lang != "" && !strings.EqualFold(tag, lang) {
-		// Try the next fence; recursion-free via a loop.
+		// Try the next fence via recursion. The depth is bounded
+		// by the number of fences in `raw`; pathological inputs
+		// could in principle blow the stack, but real LLM output
+		// has at most a handful of fenced blocks.
 		tail := raw[idx+len(openFence)+len(tag)+1:]
 		if next := extractFenced(tail, lang); next != "" {
 			return next
