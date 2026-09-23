@@ -189,6 +189,63 @@ func TestReviewMR_HappyPath(t *testing.T) {
 	}
 }
 
+// TestReviewMR_VerboseLogsPromptAndResponse confirms that --verbose
+// (which sets the logger to Debug level) actually produces the new
+// diagnostic Debug logs for the LLM prompt and raw response. This
+// is the path operators use to confirm whether the model is
+// receiving the chunks they expect and whether the response is
+// `{"findings":[], ...}` (model behaviour) or a parse failure.
+func TestReviewMR_VerboseLogsPromptAndResponse(t *testing.T) {
+	g := newFakeGitLab(t)
+	minimalHappyGitLab(g, mrFixture, changesFixture)
+
+	l := newFakeLLM(t,
+		`{"findings":[{"file":"a.go","line":1,"severity":"warning","category":"security","body":"x"}],"summary":"ok"}`,
+	)
+
+	var logBuf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	glt, _ := gitlab.NewClient(g.URL, "test-token", gitlab.RetryConfig{
+		MaxAttempts:    2,
+		InitialBackoff: 1 * time.Millisecond,
+		MaxBackoff:     5 * time.Millisecond,
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	p, _ := llm.NewOpenAIProvider(llm.OpenAIConfig{BaseURL: l.URL, APIKey: "k", Model: "m"})
+
+	r, err := NewReviewer(Config{
+		GitLab: glt, LLM: p, Model: "m", MaxDiffBytes: 4096,
+		Logger: logger,
+	})
+	if err != nil {
+		t.Fatalf("NewReviewer: %v", err)
+	}
+
+	if _, err := r.ReviewMR(context.Background(), "group/project", 42); err != nil {
+		t.Fatalf("ReviewMR: %v", err)
+	}
+
+	logs := logBuf.String()
+	for _, want := range []string{
+		`level=DEBUG msg="llm prompt"`,
+		`level=DEBUG msg="llm raw response"`,
+	} {
+		if !strings.Contains(logs, want) {
+			t.Errorf("expected Debug log %q; got:\n%s", want, logs)
+		}
+	}
+	// The prompt should contain the MR title (which the LLM sees).
+	if !strings.Contains(logs, "Add caching") {
+		t.Errorf("expected MR title in logged prompt; got:\n%s", logs)
+	}
+	// The response log should contain the LLM's actual output.
+	// slog's text formatter escapes inner quotes, so look for the
+	// surrounding JSON structure rather than literal quotes.
+	if !strings.Contains(logs, "findings") || !strings.Contains(logs, "summary") {
+		t.Errorf("expected findings/summary JSON in logged response; got:\n%s", logs)
+	}
+}
+
 func TestReviewMR_DryRun_NoPosts(t *testing.T) {
 	g := newFakeGitLab(t)
 	g.enqueue(http.StatusOK, mrFixture)
