@@ -92,13 +92,11 @@ func (p *Pool) Submit(job Job) error {
 	}
 }
 
-// start launches the workers. n defaults to capacity (bounded
-// parallelism matches the queue size). Currently uses 4
-// hard-coded because an Ollama on modest hardware serves one
-// request at a time anyway; bump this when a real LLM with
-// batching comes along.
-func (p *Pool) start(ctx context.Context, handler JobHandler) {
-	const workers = 4
+// start launches the workers. The count comes from the caller
+// (typically Config.Workers, defaulted to 4 by server.New). The
+// pool's worker count is independent of the queue depth — see
+// Config.Workers documentation for why.
+func (p *Pool) start(ctx context.Context, handler JobHandler, workers int) {
 	for i := 0; i < workers; i++ {
 		p.done.Add(1)
 		go p.runWorker(ctx, handler)
@@ -159,20 +157,7 @@ func (p *Pool) wait(timeout time.Duration) {
 	}()
 	select {
 	case <-done:
-	case <-timeAfter(timeout):
+	case <-time.After(timeout):
 		p.logger.Warn("pool shutdown timeout exceeded; abandoning in-flight jobs")
 	}
-}
-
-// timeAfter is a tiny indirection so we can keep time-related
-// imports tidy. Returns a channel that fires after d.
-func timeAfter(d time.Duration) <-chan struct{} {
-	ch := make(chan struct{})
-	go func() {
-		defer close(ch)
-		t := time.NewTimer(d)
-		defer t.Stop()
-		<-t.C
-	}()
-	return ch
 }

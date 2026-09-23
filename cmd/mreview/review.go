@@ -141,7 +141,7 @@ func runReview(stdout io.Writer, c *ReviewCmd, cfg *config.File, logger *slog.Lo
 		return logWithError(logger, ExitConfig, err.Error(), err)
 	}
 
-	result, err := rev.ReviewMR(revContext(c), c.Repo, c.MR)
+	result, err := rev.ReviewMR(context.Background(), c.Repo, c.MR)
 	if err != nil {
 		// Map gitlab.Error.Kind → typed ExitError.
 		var ge *gitlab.Error
@@ -191,15 +191,6 @@ func runReview(stdout io.Writer, c *ReviewCmd, cfg *config.File, logger *slog.Lo
 		_, _ = fmt.Fprintln(stdout, result.MR.WebURL)
 	}
 	return nil
-}
-
-// revContext returns a context with timeout derived from c, or
-// the background context when no timeout is configured. Currently
-// the review command has no global timeout flag — PerChunkTimeout
-// applies per LLM call — but this helper exists so a future
-// --timeout flag can plug in cleanly.
-func revContext(c *ReviewCmd) context.Context { //nolint:unused // reserved for future --timeout flag
-	return context.Background()
 }
 
 // logWithError logs at error level and returns a typed *ExitError

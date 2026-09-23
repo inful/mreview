@@ -38,7 +38,7 @@ func newThrottleTestServer(t *testing.T, cfg Config) (*httptest.Server, func()) 
 	srv := httptest.NewServer(mux)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	pool.start(ctx, cfg.Handler)
+	pool.start(ctx, cfg.Handler, 4) // match the production default
 	t.Cleanup(func() {
 		cancel()
 		pool.wait(time.Second)

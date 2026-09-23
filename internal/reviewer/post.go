@@ -68,10 +68,11 @@ func (r *Reviewer) postFinding(ctx context.Context, project string, iid int, ref
 		pf.Reason = classifyPostError(err)
 		if shouldFailReview(err) {
 			// Auth / not-found / conflict (non-line-range) are
-			// caller-fatal. Surface via the returned error path
-			// — we use a sentinel that the orchestrator unwraps.
-			// For now, log loudly; a future refinement would
-			// propagate up through ReviewMR.
+			// caller-fatal. Today we log at Error level and
+			// return the per-finding postedFailed so the
+			// orchestrator can decide; we don't currently
+			// propagate the sentinel up through ReviewMR. A
+			// future refinement could short-circuit the loop.
 			r.cfg.Logger.Error("inline post failed (fatal)",
 				"file", f.File,
 				"line", f.Line,

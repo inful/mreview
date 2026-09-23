@@ -3,6 +3,7 @@ package llm
 import (
 	"context"
 	"net/http"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -31,7 +32,7 @@ func TestListModels_Success(t *testing.T) {
 		t.Errorf("expected 3 models, got %d (%v)", len(models), models)
 	}
 	for _, want := range []string{"qwen2.5-coder:7b", "llama3:8b", "mistral:7b"} {
-		if !contains(models, want) {
+		if !slices.Contains(models, want) {
 			t.Errorf("models missing %q", want)
 		}
 	}
@@ -73,13 +74,4 @@ func TestPing_Success(t *testing.T) {
 	if err := p.Ping(context.Background()); err != nil {
 		t.Errorf("Ping: %v", err)
 	}
-}
-
-func contains(haystack []string, needle string) bool {
-	for _, s := range haystack {
-		if s == needle {
-			return true
-		}
-	}
-	return false
 }
