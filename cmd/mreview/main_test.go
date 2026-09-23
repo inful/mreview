@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/inful/mreview/internal/config"
 )
 
 // runWithArgs is a tiny helper used by every test in this file: it
@@ -421,6 +423,132 @@ func TestApplyConfigToEnv_IntegerFields(t *testing.T) {
 	// MaxAttempts=7 → CLI --retries=6 → MREVIEW_RETRIES=6.
 	if got := os.Getenv("MREVIEW_RETRIES"); got != "6" {
 		t.Errorf("MREVIEW_RETRIES = %q, want 6 (MaxAttempts-1)", got)
+	}
+}
+
+// TestApplyConfigToEnv_ExhaustiveBindings is the characterization
+// test for the table-driven refactor of applyConfigToEnv. Every
+// binding (config field → MREVIEW_* / LLM_* / GITLAB_* env var)
+// the function is supposed to set is exercised here, with each
+// env var asserted to the expected string.
+//
+// Bindings live in exactly one place after the refactor (a slice
+// in applyConfigToEnv), so any future contributor who adds a
+// config field without extending the table gets caught by a
+// missing entry in this test.
+//
+// Test isolation: t.Setenv restores any env vars the test sets.
+// applyConfigToEnv's cleanup function is also invoked via
+// defer, so we don't leak env vars into other tests even if
+// t.Setenv misses something.
+func TestApplyConfigToEnv_ExhaustiveBindings(t *testing.T) {
+	cfg := &config.File{
+		GitLab: config.GitLabConfig{
+			URL:      "https://gitlab.example.com",
+			TokenEnv: "MY_GITLAB_TOKEN",
+		},
+		LLM: config.LLMConfig{
+			BaseURL:   "http://llm.example.com",
+			APIKeyEnv: "MY_LLM_API_KEY",
+			Model:     "qwen-test",
+		},
+		Review: config.ReviewConfig{
+			MaxDiffBytes:    123456,
+			Temperature:     0.7,
+			MaxTokens:       4096,
+			BotUsernameEnv:  "review-bot",
+			PerChunkTimeout: "120s",
+			ChunkRetries:    3,
+			AllowPartial:    true,
+		},
+		Server: config.ServerConfig{
+			Addr:             ":8080",
+			WebhookSecretEnv: "MY_WEBHOOK_SECRET",
+			QueueSize:        64,
+			Workers:          8,
+			ShutdownTimeout:  "30s",
+		},
+		Retry: config.RetryConfig{
+			MaxAttempts:    7, // → MREVIEW_RETRIES=6
+			InitialBackoff: "500ms",
+			MaxBackoff:     "10s",
+		},
+	}
+
+	// Set the indirection env vars so TokenEnv / APIKeyEnv /
+	// WebhookSecretEnv lookups resolve.
+	t.Setenv("MY_GITLAB_TOKEN", "secret-token")
+	t.Setenv("MY_LLM_API_KEY", "secret-key")
+	t.Setenv("MY_WEBHOOK_SECRET", "secret-webhook")
+
+	cleanup := applyConfigToEnv(cfg)
+	defer cleanup()
+
+	want := map[string]string{
+		// GitLab.
+		"GITLAB_URL":            "https://gitlab.example.com",
+		"GITLAB_TOKEN":          "secret-token",
+		"GITLAB_BOT_USERNAME":   "review-bot",
+		"GITLAB_WEBHOOK_SECRET": "secret-webhook",
+		// LLM.
+		"LLM_URL":     "http://llm.example.com",
+		"LLM_API_KEY": "secret-key",
+		"LLM_MODEL":   "qwen-test",
+		// Review tunables.
+		"MREVIEW_MAX_DIFF_BYTES":    "123456",
+		"MREVIEW_TEMPERATURE":       "0.7",
+		"MREVIEW_MAX_TOKENS":        "4096",
+		"MREVIEW_PER_CHUNK_TIMEOUT": "120s",
+		"MREVIEW_CHUNK_RETRIES":     "3",
+		"MREVIEW_ALLOW_PARTIAL":     "true",
+		// Server.
+		"MREVIEW_ADDR":             ":8080",
+		"MREVIEW_QUEUE_SIZE":       "64",
+		"MREVIEW_WORKERS":          "8",
+		"MREVIEW_SHUTDOWN_TIMEOUT": "30s",
+		// Retry.
+		"MREVIEW_RETRIES":           "6", // MaxAttempts - 1
+		"MREVIEW_RETRY_BACKOFF":     "500ms",
+		"MREVIEW_RETRY_MAX_BACKOFF": "10s",
+	}
+	for k, v := range want {
+		if got := os.Getenv(k); got != v {
+			t.Errorf("%s = %q, want %q", k, got, v)
+		}
+	}
+}
+
+// TestApplyConfigToEnv_SkipsZeroValues asserts that zero-valued
+// fields do NOT propagate to the env. The convention is: a
+// missing or zero config value means "use the CLI default" —
+// applyConfigToEnv must not pre-set env vars the operator didn't
+// configure, or they'd silently win over explicit CLI flags.
+func TestApplyConfigToEnv_SkipsZeroValues(t *testing.T) {
+	cfg := configFileForTest() // every field at zero
+	t.Setenv("MREVIEW_MAX_DIFF_BYTES", "")
+	t.Setenv("MREVIEW_TEMPERATURE", "")
+	t.Setenv("MREVIEW_QUEUE_SIZE", "")
+	t.Setenv("MREVIEW_WORKERS", "")
+	t.Setenv("MREVIEW_CHUNK_RETRIES", "")
+	t.Setenv("MREVIEW_RETRIES", "")
+	t.Setenv("MREVIEW_ALLOW_PARTIAL", "")
+
+	cleanup := applyConfigToEnv(&cfg)
+	defer cleanup()
+
+	skipped := []string{
+		"MREVIEW_MAX_DIFF_BYTES",
+		"MREVIEW_TEMPERATURE",
+		"MREVIEW_QUEUE_SIZE",
+		"MREVIEW_WORKERS",
+		"MREVIEW_CHUNK_RETRIES",
+		"MREVIEW_RETRIES",
+		"MREVIEW_ALLOW_PARTIAL",
+	}
+	for _, k := range skipped {
+		if got := os.Getenv(k); got != "" {
+			t.Errorf("%s should be unset, got %q", k, got)
+		}
 	}
 }
 

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/inful/mreview/internal/config"
+	"github.com/inful/mreview/internal/event"
 	"github.com/inful/mreview/internal/gitlab"
 	"github.com/inful/mreview/internal/llm"
 	"github.com/inful/mreview/internal/reviewer"
@@ -95,6 +96,25 @@ type ReviewCmd struct {
 	Retries      int           `default:"3" name:"retries" env:"MREVIEW_RETRIES" help:"GitLab API retry attempts on transient errors."`
 	RetryBackoff time.Duration `default:"500ms" name:"retry-backoff" env:"MREVIEW_RETRY_BACKOFF" help:"Initial retry backoff; exponential with jitter."`
 
+	// Per-event branching (issue #41 / migration step 1 of #42).
+	//
+	// OnDrafts: when CI_PIPELINE_SOURCE == "merge_request_event"
+	// and CI_MERGE_REQUEST_DRAFT == "true", either run the
+	// review (run) or skip with exit 0 (skip, the default).
+	//
+	// OnPush: when CI_PIPELINE_SOURCE == "push" (a direct push
+	// to a branch without an MR), either run the review (run)
+	// or skip with exit 0 (skip, the default). Off by default
+	// because push events fire on every commit to a tracked
+	// branch and would generate runaway review activity.
+	//
+	// Both flags are no-ops when the binary is invoked outside
+	// CI (no CI_PIPELINE_SOURCE set) — the developer always
+	// wants a full review when they call mreview from a
+	// terminal.
+	OnDrafts string `default:"skip" name:"on-drafts" enum:"run,skip" env:"MREVIEW_ON_DRAFTS" help:"Action on draft MRs (CI_MERGE_REQUEST_DRAFT=true): run the review or skip with exit 0. Default skip."`
+	OnPush   string `default:"skip" name:"on-push" enum:"run,skip" env:"MREVIEW_ON_PUSH" help:"Action on direct branch pushes (CI_PIPELINE_SOURCE=push): run the review or skip with exit 0. Default skip."`
+
 	// Verbose is intentionally NOT declared here — it lives on
 	// the parent CLI struct so it's accepted globally. Declaring
 	// it again on ReviewCmd would shadow and produce a "duplicate
@@ -105,11 +125,40 @@ type ReviewCmd struct {
 // "review" subcommand. It wires up the GitLab + LLM clients and
 // delegates to internal/reviewer.
 func runReview(stdout io.Writer, c *ReviewCmd, cfg *config.File, logger *slog.Logger) error {
+	// Per-event guard (issue #41 / #42 migration step 1).
+	//
+	// Runs before any GitLab / harness / LLM work. When the
+	// event doesn't warrant a review (unsupported source,
+	// draft MR without override), logs a debug line and exits
+	// 0 — the caller (CI runner) treats the no-op as success.
+	ev := event.Detect()
+	decision := event.Decide(ev, event.Prefer(c.OnDrafts), event.Prefer(c.OnPush))
+	if !decision.Proceed {
+		logger.Debug("skipping review per per-event guard",
+			"reason", decision.Reason,
+			"source", ev.Source,
+			"mr_iid", ev.MRIID,
+			"mr_draft", ev.MRDraft,
+			"on_drafts", c.OnDrafts,
+			"on_push", c.OnPush,
+		)
+		return nil
+	}
+	if decision.Reason != "" {
+		// Proceed-via-override: log why so operators can spot
+		// that the override fired.
+		logger.Info("proceeding with review per override",
+			"reason", decision.Reason,
+			"source", ev.Source,
+		)
+	}
+
 	logger.Info("starting review",
 		"repo", c.Repo,
 		"mr", c.MR,
 		"model", c.Model,
 		"dry_run", c.DryRun,
+		"source", ev.Source,
 	)
 
 	rev, err := buildClients(clientDeps{

@@ -197,6 +197,11 @@ Flags:
       --bot-username=STRING                       Bot username for dedupe ($GITLAB_BOT_USERNAME).
       --retries=3                                 GitLab API retry attempts on transient errors.
       --retry-backoff=500ms                       Initial retry backoff; exponential with jitter.
+      --on-drafts=skip                            Action on draft MRs (CI_MERGE_REQUEST_DRAFT=true):
+                                                    run the review or skip with exit 0. Default skip.
+      --on-push=skip                              Action on direct branch pushes
+                                                    (CI_PIPELINE_SOURCE=push): run the review or
+                                                    skip with exit 0. Default skip.
       --dry-run                                   Log intended LLM and GitLab calls without performing them.
 ```
 
@@ -266,6 +271,45 @@ All checks passed.
 
 On failure (e.g. wrong token, unreachable LLM) the subcommand exits 1
 with a per-check breakdown.
+
+## Behaviour by event
+
+When invoked from a GitLab CI pipeline, `mreview review` reads the
+predefined `CI_PIPELINE_SOURCE` (and, for MR events, `CI_MERGE_REQUEST_DRAFT`)
+to decide whether the event warrants a review. The supported / unsupported
+table mirrors GitLab's [predefined CI variables][gitlab-ci-vars]:
+
+| `CI_PIPELINE_SOURCE`         | Default behaviour                | Override        |
+|------------------------------|----------------------------------|-----------------|
+| _empty (local CLI invocation)_ | Run review                      | —               |
+| `merge_request_event` (non-draft) | Run review                  | —               |
+| `merge_request_event` (draft)    | **Skip** (exit 0)            | `--on-drafts=run` |
+| `web` / `api` / `schedule`   | Run review                      | —               |
+| `push`                       | **Skip** (exit 0)                | `--on-push=run`  |
+| `trigger` / `pipeline` / `parent_pipeline` | **Skip** (exit 0) — would cause feedback loops | — |
+| `webide` / `chat` / `ondemand_dast_*` / `security_orchestration_policy` / `external_pull_request_event` | **Skip** (exit 0) | — |
+
+[gitlab-ci-vars]: https://docs.gitlab.com/ee/ci/variables/predefined_variables.html
+
+**Skip means a clean exit 0.** CI runners treat the no-op as success;
+the guard emits a one-line `Debug`-level log line with the reason
+(use `--verbose` to see it).
+
+**Why a guard at all?** mreview supports both CI and `mreview serve`
+modes today. When the project moves to CI-first review (per the
+[architecture reset](https://github.com/inful/mreview/issues/42)),
+a stray invocation from a `trigger:` child pipeline or a `webide`
+launch would otherwise spam reviews on every code edit. The guard
+short-circuits those paths with a deterministic `exit 0`.
+
+**Local invocation.** When `CI_PIPELINE_SOURCE` is unset (a developer
+running `mreview review` from a terminal), the guard always proceeds —
+even if `--on-drafts=skip` is set, that flag is a no-op locally. The
+override flags exist for CI-only behaviour; they don't change local
+ergonomics.
+
+The per-event *content* of the review (incremental vs full, summary
+post, dedupe baseline) is the orchestrator's concern — see `internal/reviewer/`.
 
 ## What the bot posts
 
