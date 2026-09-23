@@ -1324,6 +1324,21 @@ func TestBuildMergePrompt_PreservesFindingSchema(t *testing.T) {
 		}
 	}
 
+	// "Reducer, not a generator" guard: the observed failure mode
+	// was the merge LLM synthesising new findings ("the MR contains
+	// no Go code") that weren't in the input list. The prompt must
+	// explicitly forbid adding new findings — only preserve,
+	// dedupe, or summarise the inputs.
+	for _, want := range []string{
+		"reducer, not a generator",
+		"do not synthesise new findings",
+		"Combined findings",
+	} {
+		if !strings.Contains(system, want) {
+			t.Errorf("merge prompt missing anti-synthesise guard: %q", want)
+		}
+	}
+
 	// The user prompt must carry both per-chunk summaries and
 	// the formatted findings so the merge LLM has full context.
 	for _, want := range []string{
