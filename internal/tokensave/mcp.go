@@ -74,11 +74,14 @@ func SpawnMCPServer(cfg Config) mcp.ServerConfig {
 		bin = DefaultBin
 	}
 
-	// tokensave's CLI exposes an `mcp` subcommand that
-	// starts the MCP server in stdio mode. We pass
-	// `--project-root` so the server knows what to index.
+	// tokensave's CLI exposes a `serve` subcommand that
+	// starts the MCP server over stdio. We pass `--path` so
+	// the server knows which project to index. (Older
+	// tokensave builds called this subcommand `mcp` and the
+	// flag `--project-root`; current releases use the names
+	// below. The pinned bundle in the Dockerfile matches.)
 	args := make([]string, 0, 3+len(cfg.Args))
-	args = append(args, "mcp", "--project-root", cfg.ProjectRoot)
+	args = append(args, "serve", "--path", cfg.ProjectRoot)
 	args = append(args, cfg.Args...)
 
 	return mcp.ServerConfig{

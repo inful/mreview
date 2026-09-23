@@ -22,10 +22,12 @@ func TestSpawnMCPServer_Defaults(t *testing.T) {
 		t.Errorf("Command = %q, want %q (PATH-resolved default)",
 			cfg.Command, DefaultBin)
 	}
-	// tokensave's MCP subcommand takes `--project-root` as
-	// the second positional. Pin the exact shape so a future
-	// refactor doesn't accidentally flip the args.
-	wantArgs := []string{"mcp", "--project-root", "/tmp/repo"}
+	// tokensave's MCP subcommand is `serve` and the path
+	// flag is `--path`. Pin the exact shape so a future
+	// refactor doesn't accidentally flip the args. (Older
+	// tokensave builds used `mcp --project-root`; the
+	// version pinned in Dockerfile uses the names below.)
+	wantArgs := []string{"serve", "--path", "/tmp/repo"}
 	if len(cfg.Args) != len(wantArgs) {
 		t.Fatalf("Args = %v, want %v", cfg.Args, wantArgs)
 	}
@@ -66,7 +68,7 @@ func TestSpawnMCPServer_ExtraArgs(t *testing.T) {
 		ProjectRoot: "/tmp/repo",
 		Args:        []string{"--log-level=debug"},
 	})
-	want := []string{"mcp", "--project-root", "/tmp/repo", "--log-level=debug"}
+	want := []string{"serve", "--path", "/tmp/repo", "--log-level=debug"}
 	if len(cfg.Args) != len(want) {
 		t.Fatalf("Args = %v, want %v", cfg.Args, want)
 	}
