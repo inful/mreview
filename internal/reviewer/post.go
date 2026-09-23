@@ -8,6 +8,7 @@ import (
 
 	"github.com/inful/mreview/internal/gitlab"
 	"github.com/inful/mreview/internal/llm"
+	"github.com/inful/mreview/internal/strutil"
 )
 
 // postSummary posts the summary note. Honors cfg.DryRun: when
@@ -103,14 +104,14 @@ func classifyPostError(err error) string {
 		case gitlab.KindAuth:
 			return "auth/permission denied"
 		case gitlab.KindBadRequest:
-			return fmt.Sprintf("bad request: %s", truncate(ge.Body, 100))
+			return fmt.Sprintf("bad request: %s", strutil.Truncate(ge.Body, 100))
 		case gitlab.KindTransient:
 			return "transient failure (retries exhausted)"
 		default:
-			return fmt.Sprintf("unknown error: %s", truncate(ge.Body, 100))
+			return fmt.Sprintf("unknown error: %s", strutil.Truncate(ge.Body, 100))
 		}
 	}
-	return truncate(err.Error(), 100)
+	return strutil.Truncate(err.Error(), 100)
 }
 
 // shouldFailReview reports whether a post error should abort the
@@ -130,13 +131,6 @@ func shouldFailReview(err error) bool {
 	default:
 		return false
 	}
-}
-
-func truncate(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return s[:n] + "..."
 }
 
 // buildInlineComment constructs the InlineComment for one finding,

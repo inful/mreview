@@ -27,6 +27,7 @@ import (
 
 	"github.com/inful/mreview/internal/gitlab"
 	"github.com/inful/mreview/internal/llm"
+	"github.com/inful/mreview/internal/strutil"
 )
 
 // Reviewer is the orchestrator. Construct one with NewReviewer,
@@ -303,7 +304,7 @@ func (r *Reviewer) reviewChunks(ctx context.Context, mr *gitlab.MergeRequest, ch
 
 	parsed, err := llm.ParseReviewResponse(resp.Content)
 	if err != nil {
-		return llm.ReviewResponse{}, fmt.Errorf("parse: %w (raw: %s)", err, truncateForLog(resp.Content))
+		return llm.ReviewResponse{}, fmt.Errorf("parse: %w (raw: %s)", err, strutil.Truncate(resp.Content, 1000))
 	}
 	return parsed, nil
 }

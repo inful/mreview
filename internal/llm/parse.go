@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+
+	"github.com/inful/mreview/internal/strutil"
 )
 
 // ErrParseFailure is returned by ParseReviewResponse when no JSON
@@ -18,7 +20,7 @@ type ErrParseFailure struct {
 
 // Error implements error.
 func (e *ErrParseFailure) Error() string {
-	return fmt.Sprintf("llm: failed to parse review response: %v: %s", e.Cause, truncate(e.Raw, 200))
+	return fmt.Sprintf("llm: failed to parse review response: %v: %s", e.Cause, strutil.Truncate(e.Raw, 200))
 }
 
 // Unwrap exposes the underlying parser error.
@@ -445,13 +447,4 @@ func findMatching(s []byte, open byte) (int, bool) {
 		}
 	}
 	return 0, false
-}
-
-// truncate returns the first n characters of s with "..." appended
-// when it would be cut.
-func truncate(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return s[:n] + "..."
 }

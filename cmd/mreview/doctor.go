@@ -11,6 +11,7 @@ import (
 
 	"github.com/inful/mreview/internal/gitlab"
 	"github.com/inful/mreview/internal/llm"
+	"github.com/inful/mreview/internal/strutil"
 )
 
 // DoctorCmd holds the flags for `mreview doctor`.
@@ -134,7 +135,7 @@ func doctorGitLab(c *DoctorCmd, logger *slog.Logger) doctorResult {
 		r.ok = false
 		var ge *gitlab.Error
 		if errors.As(err, &ge) {
-			r.err = fmt.Sprintf("%s (status=%d): %s", ge.Kind, ge.StatusCode, truncate(ge.Body, 120))
+			r.err = fmt.Sprintf("%s (status=%d): %s", ge.Kind, ge.StatusCode, strutil.Truncate(ge.Body, 120))
 		} else {
 			r.err = err.Error()
 		}
@@ -199,16 +200,6 @@ func doctorLLM(c *DoctorCmd, logger *slog.Logger) doctorResult {
 			c.LLMURL, c.Model, modelList)
 	}
 	return r
-}
-
-// truncate limits a string to n bytes, appending "..." when
-// truncated. Used to keep doctor's failure-detail lines from
-// blowing up the report when GitLab returns a long error body.
-func truncate(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return s[:n] + "..."
 }
 
 // doctorConfig summarizes the review-relevant config the operator

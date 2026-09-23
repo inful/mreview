@@ -7,6 +7,8 @@ import (
 	"strings"
 
 	gl "gitlab.com/gitlab-org/api/client-go"
+
+	"github.com/inful/mreview/internal/strutil"
 )
 
 // Client is a thin wrapper over the official gitlab.com/client-go
@@ -100,12 +102,12 @@ func (c *Client) classify(method, url string, resp *gl.Response, err error, extr
 	case status != 0:
 		// Got a response. Pick the best body source and the default
 		// kind from the status code.
-		e.Body = truncateBody(bodyFromResponse(resp, err))
+		e.Body = strutil.Truncate(bodyFromResponse(resp, err), 4096)
 		e.Kind = ClassifyStatus(status)
 	case err != nil:
 		// No response — surface the transport error as the body so
 		// the caller has something concrete in logs.
-		e.Body = truncateBody(err.Error())
+		e.Body = strutil.Truncate(err.Error(), 4096)
 	}
 	// Body is already truncated inside both branches; the else
 	// (status==0 && err==nil) path leaves Body empty.
@@ -156,16 +158,6 @@ func asUpstreamError(err error) *gl.ErrorResponse {
 		return er
 	}
 	return nil
-}
-
-// truncateBody caps the body stored in Error.Body at 4 KiB. Long
-// error pages blow up logs and aren't useful for diagnosis.
-func truncateBody(body string) string {
-	const bodyMax = 4096
-	if len(body) <= bodyMax {
-		return body
-	}
-	return body[:bodyMax] + "...(truncated)"
 }
 
 // validatePath is a cheap sanity check on the project path argument

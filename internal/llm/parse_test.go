@@ -180,23 +180,6 @@ func TestExtractFenced_NoFence(t *testing.T) {
 	}
 }
 
-func TestTruncate(t *testing.T) {
-	cases := []struct {
-		in   string
-		n    int
-		want string
-	}{
-		{"short", 10, "short"},
-		{"a longish string", 5, "a lon..."},
-		{"", 5, ""},
-	}
-	for _, tc := range cases {
-		if got := truncate(tc.in, tc.n); got != tc.want {
-			t.Errorf("truncate(%q, %d) = %q, want %q", tc.in, tc.n, got, tc.want)
-		}
-	}
-}
-
 // TestParseReviewResponse_Streaming_TruncatedMidString pins the
 // recovery path for the production failure mode observed in
 // 2026-09: the LLM hit MaxTokens mid-string while generating the

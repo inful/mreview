@@ -193,7 +193,7 @@ func TestClassify_BodyFromLiveResponse(t *testing.T) {
 func TestClassify_BodyTruncatedAt4KiB(t *testing.T) {
 	c := newClassifyClient(t, "http://unused")
 	// 200 KiB of body — readResponseBody caps at 64 KiB, then
-	// truncateBody caps at 4 KiB.
+	// strutil.Truncate caps at 4 KiB.
 	big := strings.Repeat("X", 200*1024)
 	resp := fakeResp(http.StatusBadGateway, big)
 	err := fakeErrResp(http.StatusBadGateway, big)
@@ -202,10 +202,10 @@ func TestClassify_BodyTruncatedAt4KiB(t *testing.T) {
 	if !errors.As(got, &e) {
 		t.Fatalf("got %T, want *Error", got)
 	}
-	if len(e.Body) > 4096+len("...(truncated)") {
-		t.Errorf("Body length = %d, want <= %d", len(e.Body), 4096+len("...(truncated)"))
+	if len(e.Body) > 4096+len("...") {
+		t.Errorf("Body length = %d, want <= %d", len(e.Body), 4096+len("..."))
 	}
-	if !strings.HasSuffix(e.Body, "...(truncated)") {
+	if !strings.HasSuffix(e.Body, "...") {
 		t.Errorf("Body should end with truncation marker, got suffix %q",
 			e.Body[max(0, len(e.Body)-20):])
 	}

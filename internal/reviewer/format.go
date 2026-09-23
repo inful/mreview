@@ -101,16 +101,6 @@ func countPosted(pfs []PostedFinding) int {
 	return n
 }
 
-// truncateForLog is a small helper for logging the raw LLM output
-// when parsing fails. Bounded so we don't blow up logs.
-func truncateForLog(s string) string {
-	const logMax = 1000
-	if len(s) <= logMax {
-		return s
-	}
-	return s[:logMax] + "...(truncated)"
-}
-
 // shouldPostSummary decides whether to post the summary note for
 // this review action.
 //
