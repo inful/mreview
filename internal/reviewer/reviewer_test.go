@@ -1259,6 +1259,86 @@ func TestReviewMR_ZeroFindings_NoWarnOnSmallDiff(t *testing.T) {
 // use it.
 var _ = json.Marshal
 
+// TestBuildMergePrompt_PreservesFindingSchema pins the merge
+// prompt's required field set. The bug observed in production:
+// the merge LLM renamed `body` → `message` in its output, which
+// caused filterFindings to drop every merged finding (empty body).
+// The schema is now inline in the merge prompt with all six
+// field names, plus an explicit "do NOT rename to 'message' or
+// 'description'" guard for `body`. If a future prompt edit removes
+// the schema or the rename guard, this test fails.
+func TestBuildMergePrompt_PreservesFindingSchema(t *testing.T) {
+	mr := &gitlab.MergeRequest{
+		IID:          13,
+		Title:        "MVP for pipeline issue manager",
+		SourceBranch: "develop",
+		TargetBranch: "main",
+		Author:       gitlab.User{Username: "inful"},
+		DiffRefs:     gitlab.DiffRefs{BaseSHA: "a", StartSHA: "b", HeadSHA: "c"},
+	}
+	chunks := []llm.ReviewResponse{
+		{
+			Findings: []llm.Finding{
+				{File: "a.go", Line: 1, Severity: llm.SeverityError, Category: llm.CategoryCorrectness, Body: "real bug"},
+			},
+			Summary: "Chunk 1 found a real bug.",
+		},
+		{
+			Findings: []llm.Finding{
+				{File: "b.go", Line: 2, Severity: llm.SeverityWarning, Category: llm.CategorySecurity, Body: "supply-chain"},
+			},
+			Summary: "Chunk 2 found a supply-chain concern.",
+		},
+	}
+	system, user := buildMergePrompt(mr, chunks)
+
+	// System prompt must include the full schema with every field
+	// the reviewer reads downstream (file, line, severity, category,
+	// body, suggestion, summary).
+	for _, want := range []string{
+		`"findings": [`,
+		`"file": "<path at HEAD>"`,
+		`"line": <1-indexed line number>`,
+		`"severity": "info" | "warning" | "error"`,
+		`"category":`,
+		`"body":`,
+		`"suggestion":`,
+		`"summary":`,
+	} {
+		if !strings.Contains(system, want) {
+			t.Errorf("merge system prompt missing required fragment %q", want)
+		}
+	}
+
+	// Explicit anti-rename guard: the production failure mode was
+	// the merge LLM using "message" or "description" instead of
+	// "body". The prompt must call this out explicitly.
+	for _, want := range []string{
+		"do NOT rename",
+		"'message'",
+		"'description'",
+		"silently dropped",
+	} {
+		if !strings.Contains(system, want) {
+			t.Errorf("merge prompt missing anti-rename guard: %q", want)
+		}
+	}
+
+	// The user prompt must carry both per-chunk summaries and
+	// the formatted findings so the merge LLM has full context.
+	for _, want := range []string{
+		"Chunk 1 summary",
+		"Chunk 2 summary",
+		"Combined findings (count=2)",
+		"a.go:1",
+		"b.go:2",
+	} {
+		if !strings.Contains(user, want) {
+			t.Errorf("merge user prompt missing required fragment %q", want)
+		}
+	}
+}
+
 // silence unused-import warning for json in case future tests
 // use it.
 var _ = json.Marshal
