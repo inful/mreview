@@ -101,7 +101,8 @@ func ClassifyStatus(status int) Kind {
 //
 // It is constructable directly so retry / classify helpers can wrap
 // upstream errors uniformly. Callers should treat it as opaque except
-// for Kind, StatusCode, Method, URL, Body (all read-only fields).
+// for Kind, StatusCode, Method, URL, Body, RetryAfter (all read-only
+// fields).
 type Error struct {
 	Kind       Kind
 	StatusCode int    // 0 when no HTTP response was received
@@ -109,6 +110,19 @@ type Error struct {
 	URL        string // full request URL
 	Body       string // response body, truncated to 4 KiB
 	Cause      error  // underlying error (e.g. context.Canceled); may be nil
+
+	// RetryAfter carries the raw value of the upstream Retry-After
+	// HTTP response header, when the response carried one and the
+	// header was reachable. Empty when the header was absent, when
+	// the upstream request never received a response, or when the
+	// caller constructed *Error directly without populating it.
+	//
+	// doWithRetry parses this via parseRetryAfterHeader (delta-
+	// seconds and HTTP-date forms both supported) and caps the
+	// result at RetryConfig.RetryAfterCap. A header value the parser
+	// cannot understand is treated as if absent — exponential
+	// backoff takes over.
+	RetryAfter string
 }
 
 // Error implements the error interface. Format:

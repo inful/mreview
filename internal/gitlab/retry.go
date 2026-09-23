@@ -141,38 +141,39 @@ func exponentialBackoff(base, maxBackoff time.Duration, attempt int) time.Durati
 	return d
 }
 
-// retryAfterDuration parses the Retry-After value from the error's Body
-// when the body carries a header value, or returns 0 when not present.
+// retryAfterDuration returns the next Retry-After wait to honour, or
+// 0 when no parseable hint is available.
 //
-// The Body of a transient *Error typically contains the upstream error
-// message; we don't get the header back through the wrapped client.
-// In practice we read Retry-After directly from the *http.Response
-// inside the client method (see client.go), so this helper is
-// conservative: it only handles delta-seconds in the body for now.
+// It prefers the RetryAfter header value captured by (*Client).classify
+// (the happy path — the upstream response carried a Retry-After
+// header and we read it). When that's absent (e.g. a hand-constructed
+// *Error used in a test) it falls back to parsing the response body
+// for the same delta-seconds / HTTP-date shapes.
 //
 // now is injected so tests can pin the wall clock for HTTP-date parsing.
 func retryAfterDuration(e *Error, now time.Time) time.Duration {
-	if e == nil || e.Body == "" {
+	if e == nil {
 		return 0
 	}
-	// Try delta-seconds first.
-	if d, err := strconv.Atoi(e.Body); err == nil && d >= 0 {
-		return time.Duration(d) * time.Second
+	if d := parseRetryAfterHeader(e.RetryAfter, now); d > 0 {
+		return d
 	}
-	// Try HTTP-date.
-	if t, err := http.ParseTime(e.Body); err == nil {
-		d := t.Sub(now)
-		if d < 0 {
-			return 0
-		}
+	if d := parseRetryAfterHeader(e.Body, now); d > 0 {
 		return d
 	}
 	return 0
 }
 
-// parseRetryAfterHeader is the canonical parser for the HTTP header
-// value. It accepts both delta-seconds ("120") and HTTP-date forms.
+// parseRetryAfterHeader is the canonical parser for the Retry-After
+// value, accepting both delta-seconds ("120") and HTTP-date forms.
 // Returns 0 for missing or unparseable values.
+//
+// Used by both:
+//   - retryAfterDuration, when reading the upstream response's
+//     Retry-After header (captured on *Error.RetryAfter) or the body
+//     fallback.
+//   - the *_HTTPDate / _DeltaSeconds unit tests, which exercise the
+//     two forms in isolation.
 func parseRetryAfterHeader(value string, now time.Time) time.Duration {
 	if value == "" {
 		return 0

@@ -76,6 +76,52 @@ func TestNextBackoff_HonorsRetryAfter(t *testing.T) {
 	}
 }
 
+// TestNextBackoff_PrefersHeaderOverBody asserts the header (set by
+// classify from the upstream response) wins over the legacy body
+// fallback. Without this precedence, the body of an error response
+// could override a server-issued Retry-After hint and we'd retry
+// too early.
+func TestNextBackoff_PrefersHeaderOverBody(t *testing.T) {
+	cfg := RetryConfig{InitialBackoff: 100 * time.Millisecond, MaxBackoff: 5 * time.Second}
+	e := &Error{
+		Kind:       KindTransient,
+		RetryAfter: "10", // header says 10s
+		Body:       "5",  // body suggests 5s (legacy fallback)
+	}
+	if d := nextBackoff(cfg, 1, e); d != 10*time.Second {
+		t.Errorf("header should win over body: got %v, want 10s", d)
+	}
+}
+
+// TestRetryAfterDuration_HTTPDateInHeader exercises the HTTP-date
+// form via the retryAfterDuration helper, which accepts an injected
+// `now` so the assertion is wall-clock-stable. nextBackoff always
+// uses time.Now() and is not the right knob for HTTP-date tests.
+func TestRetryAfterDuration_HTTPDateInHeader(t *testing.T) {
+	now := time.Date(2026, 9, 22, 12, 0, 0, 0, time.UTC)
+	httpDate := now.Add(45 * time.Second).Format(http.TimeFormat)
+	e := &Error{Kind: KindTransient, RetryAfter: httpDate}
+	if d := retryAfterDuration(e, now); d != 45*time.Second {
+		t.Errorf("http-date header parse via retryAfterDuration = %v, want 45s", d)
+	}
+	// And past-date header reads as "no wait".
+	past := now.Add(-time.Minute).Format(http.TimeFormat)
+	e.RetryAfter = past
+	if d := retryAfterDuration(e, now); d != 0 {
+		t.Errorf("past http-date header parse = %v, want 0", d)
+	}
+}
+
+// TestRetryAfterDuration_NilSafe asserts the helper handles a nil
+// receiver without panicking. Caller path is nil-impossible in
+// production (doWithRetry checks AsError first), but the helper is
+// the public-facing contract for tests.
+func TestRetryAfterDuration_NilSafe(t *testing.T) {
+	if d := retryAfterDuration(nil, time.Now()); d != 0 {
+		t.Errorf("nil receiver: got %v, want 0", d)
+	}
+}
+
 func TestNextBackoff_FallsBackToExponential(t *testing.T) {
 	cfg := RetryConfig{InitialBackoff: 100 * time.Millisecond, MaxBackoff: 5 * time.Second}
 	e := &Error{Kind: KindTransient, Body: ""}

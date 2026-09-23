@@ -291,6 +291,62 @@ func TestClassify_LineRangeClassifierReal(t *testing.T) {
 	}
 }
 
+// TestClassify_CapturesRetryAfterHeader checks the Retry-After
+// capture on *Error.RetryAfter — doWithRetry reads this to decide
+// how long to wait before the next attempt. Without this, server-
+// supplied backoff hints are silently discarded.
+func TestClassify_CapturesRetryAfterHeader(t *testing.T) {
+	c := newClassifyClient(t, "http://unused")
+	resp := fakeResp(http.StatusServiceUnavailable, "upstream busy")
+	// fakeResp doesn't allocate Header; populate it before Set so
+	// the call doesn't panic on a nil map.
+	resp.Header = make(http.Header)
+	resp.Header.Set("Retry-After", "30")
+
+	got := c.classify(http.MethodGet, "http://x/y", resp, nil)
+	var e *Error
+	if !errors.As(got, &e) {
+		t.Fatalf("got %T, want *Error", got)
+	}
+	if e.RetryAfter != "30" {
+		t.Errorf("RetryAfter = %q, want %q", e.RetryAfter, "30")
+	}
+}
+
+// TestClassify_NoRetryAfterHeader asserts an absent Retry-After
+// header leaves the field empty (not a sentinel). retryAfterDuration
+// turns "" into 0, which means "fall back to exponential backoff".
+func TestClassify_NoRetryAfterHeader(t *testing.T) {
+	c := newClassifyClient(t, "http://unused")
+	resp := fakeResp(http.StatusInternalServerError, "down")
+
+	got := c.classify(http.MethodGet, "http://x/y", resp, nil)
+	var e *Error
+	if !errors.As(got, &e) {
+		t.Fatalf("got %T, want *Error", got)
+	}
+	if e.RetryAfter != "" {
+		t.Errorf("RetryAfter = %q, want empty", e.RetryAfter)
+	}
+}
+
+// TestClassify_NoResponseLeavesRetryAfterEmpty confirms a nil
+// response (e.g. transport error) does not surface a header value;
+// retryAfterDuration would otherwise silently skip backoff.
+func TestClassify_NoResponseLeavesRetryAfterEmpty(t *testing.T) {
+	c := newClassifyClient(t, "http://unused")
+	cause := errors.New("connection refused")
+
+	got := c.classify(http.MethodGet, "http://x/y", nil, cause)
+	var e *Error
+	if !errors.As(got, &e) {
+		t.Fatalf("got %T, want *Error", got)
+	}
+	if e.RetryAfter != "" {
+		t.Errorf("RetryAfter = %q, want empty when no response", e.RetryAfter)
+	}
+}
+
 // testContext is a tiny helper so the inline classifier test above
 // doesn't pull context into the imports list at the top of the file.
 func testContext() context.Context { return context.Background() }
