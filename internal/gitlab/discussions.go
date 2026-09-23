@@ -24,13 +24,14 @@ func (c *Client) ListDiscussions(ctx context.Context, project string, iid int) (
 
 	var result []Discussion
 	op := "ListDiscussions"
+	url := fmt.Sprintf("%s/projects/%s/merge_requests/%d/discussions", c.baseURL, project, iid)
 	err := doWithRetry(ctx, c.retry, op, func(ctx context.Context, attempt int) error {
 		opts := &gl.ListMergeRequestDiscussionsOptions{
 			ListOptions: gl.ListOptions{PerPage: 100},
 		}
 		discs, resp, err := c.inner.Discussions.ListMergeRequestDiscussions(project, int64(iid), opts)
 		if err != nil {
-			return classifyListDiscussionsError(op, c.baseURL, project, iid, resp, err)
+			return c.classify(http.MethodGet, url, resp, err)
 		}
 		result = make([]Discussion, 0, len(discs))
 		for _, d := range discs {
@@ -49,20 +50,4 @@ func (c *Client) ListDiscussions(ctx context.Context, project string, iid int) (
 		return nil, err
 	}
 	return result, nil
-}
-
-// classifyListDiscussionsError maps an upstream ListDiscussions
-// error to a typed *Error.
-func classifyListDiscussionsError(op, baseURL, project string, iid int, resp *gl.Response, err error) error {
-	method := http.MethodGet
-	url := fmt.Sprintf("%s/projects/%s/merge_requests/%d/discussions", baseURL, project, iid)
-	status := 0
-	if resp != nil {
-		status = resp.StatusCode
-	}
-	respBody := ""
-	if resp != nil {
-		respBody = readResponseBody(resp.Body)
-	}
-	return classifyAndWrap(method, url, status, respBody, err)
 }

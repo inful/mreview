@@ -2,7 +2,6 @@ package gitlab
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -17,11 +16,6 @@ import (
 // The diffRefs are required by GitLab to anchor the comment — every
 // inline position MUST carry base_sha, start_sha, head_sha or
 // GitLab returns 400.
-//
-// TODO: collapse into a single shared classifier (issue #3) — this
-// classifyPostDiscussionError currently duplicates the
-// URL/status/body pattern used by classifyPostSummaryError and the
-// four classify*Error helpers in the read paths.
 func (c *Client) PostDiscussion(ctx context.Context, project string, iid int, refs DiffRefs, cmt InlineComment) (*Discussion, error) {
 	if err := validatePath(project); err != nil {
 		return nil, err
@@ -46,6 +40,16 @@ func (c *Client) PostDiscussion(ctx context.Context, project string, iid int, re
 
 	var result *Discussion
 	op := "PostDiscussion"
+	url := fmt.Sprintf("%s/projects/%s/merge_requests/%d/discussions", c.baseURL, project, iid)
+	// GitLab returns 400 with "line ... is not a valid line" or
+	// "old_line is not in range" when the LLM cites a line outside
+	// the file. Classify as conflict so the caller can drop the
+	// finding and log it; not a retryable transient.
+	lineRangeAsConflict := func(e *Error) {
+		if e.Kind == KindBadRequest && isLineRangeError(e.Body) {
+			e.Kind = KindConflict
+		}
+	}
 	err := doWithRetry(ctx, c.retry, op, func(ctx context.Context, attempt int) error {
 		// GitLab's /discussions endpoint requires position fields
 		// to match the file status (per the docs):
@@ -101,7 +105,7 @@ func (c *Client) PostDiscussion(ctx context.Context, project string, iid int, re
 		}
 		disc, resp, err := c.inner.Discussions.CreateMergeRequestDiscussion(project, int64(iid), opts)
 		if err != nil {
-			return classifyPostDiscussionError(op, c.baseURL, project, iid, resp, err, body)
+			return c.classify(http.MethodPost, url, resp, err, lineRangeAsConflict)
 		}
 		result = projectDiscussion(disc)
 		c.logger.Debug("gitlab post ok",
@@ -124,60 +128,6 @@ func (c *Client) PostDiscussion(ctx context.Context, project string, iid int, re
 // ptrString returns a pointer to s. Tiny helper to make
 // optional-position-field construction in PostDiscussion read cleanly.
 func ptrString(s string) *string { return &s }
-
-// classifyPostDiscussionError is the inline-discussion sibling of
-// classifyPostSummaryError.
-//
-// We special-case 400 as KindConflict because GitLab returns 400
-// when the line anchor is out of range / the position doesn't match
-// a real hunk in the diff — semantically a conflict, not a
-// programmer bug. The caller can still inspect the original
-// StatusCode via the returned *Error.
-func classifyPostDiscussionError(op, baseURL, project string, iid int, resp *gl.Response, err error, body string) error {
-	method := http.MethodPost
-	url := fmt.Sprintf("%s/projects/%s/merge_requests/%d/discussions", baseURL, project, iid)
-	status := 0
-	if resp != nil {
-		status = resp.StatusCode
-	}
-	respBody := ""
-	// The upstream client drains resp.Body in CheckResponse before
-	// returning the *ErrorResponse, so reading resp.Body here
-	// returns "". Use the upstream's parsed Message via errors.As
-	// when it's available.
-	if errResp := asUpstreamError(err); errResp != nil && len(errResp.Body) > 0 {
-		respBody = string(errResp.Body)
-	} else if errResp != nil && errResp.Message != "" {
-		respBody = errResp.Message
-	} else if resp != nil {
-		respBody = readResponseBody(resp.Body)
-	}
-	// GitLab returns 400 with "line ... is not a valid line" or
-	// "old_line is not in range" when the LLM cites a line outside
-	// the file. Classify as conflict so the caller can drop the
-	// finding and log it; not a retryable transient.
-	wrapped := classifyAndWrap(method, url, status, respBody, err)
-	if e := AsError(wrapped); e != nil {
-		if e.Kind == KindBadRequest && isLineRangeError(respBody) {
-			e.Kind = KindConflict
-		}
-	}
-	return wrapped
-}
-
-// asUpstreamError extracts a *gitlab.ErrorResponse from the upstream
-// error chain. Returns nil when the error isn't an upstream one
-// (e.g. context cancellation, network error).
-func asUpstreamError(err error) *gl.ErrorResponse {
-	if err == nil {
-		return nil
-	}
-	var er *gl.ErrorResponse
-	if errors.As(err, &er) {
-		return er
-	}
-	return nil
-}
 
 // isLineRangeError matches the GitLab error strings that signal the
 // posted position doesn't match a real hunk. Heuristic — false

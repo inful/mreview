@@ -47,8 +47,8 @@ type DiffRefs struct {
 // NOT the numeric project ID — the official client accepts both, but
 // the slug is what every webhook payload carries.
 //
-// Errors are typed via classifyAndWrap so callers can switch on Kind
-// without parsing the HTTP status.
+// Errors are typed via (*Client).classify so callers can switch on
+// Kind without parsing the HTTP status.
 func (c *Client) FetchMR(ctx context.Context, project string, iid int) (*MergeRequest, error) {
 	if err := validatePath(project); err != nil {
 		return nil, err
@@ -59,10 +59,11 @@ func (c *Client) FetchMR(ctx context.Context, project string, iid int) (*MergeRe
 
 	var result *MergeRequest
 	op := "FetchMR"
+	url := fmt.Sprintf("%s/projects/%s/merge_requests/%d", c.baseURL, project, iid)
 	err := doWithRetry(ctx, c.retry, op, func(ctx context.Context, attempt int) error {
 		mr, resp, err := c.inner.MergeRequests.GetMergeRequest(project, int64(iid), nil)
 		if err != nil {
-			return classifyFetchError(op, c.baseURL, project, iid, resp, err)
+			return c.classify(http.MethodGet, url, resp, err)
 		}
 		result = projectMR(mr)
 		c.logger.Debug("gitlab fetch ok",
@@ -105,21 +106,4 @@ func projectMR(mr *gl.MergeRequest) *MergeRequest {
 		}
 	}
 	return out
-}
-
-// classifyFetchError turns an upstream client error into a typed
-// *Error. The upstream client returns *gl.Response for the response
-// even on error (so we can read the status code).
-func classifyFetchError(op, baseURL, project string, iid int, resp *gl.Response, err error) error {
-	method := http.MethodGet
-	url := fmt.Sprintf("%s/projects/%s/merge_requests/%d", baseURL, project, iid)
-	status := 0
-	if resp != nil {
-		status = resp.StatusCode
-	}
-	body := ""
-	if resp != nil {
-		body = readResponseBody(resp.Body)
-	}
-	return classifyAndWrap(method, url, status, body, err)
 }

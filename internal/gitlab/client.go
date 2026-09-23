@@ -12,7 +12,7 @@ import (
 // Client is a thin wrapper over the official gitlab.com/client-go
 // client. It adds:
 //   - a single NewClient entrypoint that owns base URL + token config
-//   - typed errors via classifyAndWrap
+//   - typed errors via (*Client).classify
 //   - retry via doWithRetry
 //   - consistent slog context (repo, mr_iid) on every log line
 //
@@ -67,28 +67,95 @@ func NewClient(baseURL, token string, retry RetryConfig, logger *slog.Logger) (*
 // calls should go through wrapper methods so they get retry + logging.
 func (c *Client) Inner() *gl.Client { return c.inner }
 
-// classifyAndWrap converts an upstream API response + body into a
-// typed *Error. status==0 means no response was received (network
-// error); in that case the returned error is *Error{Kind: Other} with
-// Cause set.
-func classifyAndWrap(method, url string, status int, body string, cause error) error {
-	if status == 0 && cause != nil {
-		return &Error{
-			Kind:   KindOther,
-			Method: method,
-			URL:    url,
-			Body:   cause.Error(),
-			Cause:  cause,
-		}
+// classify turns an upstream API response + transport error into a
+// typed *Error. It factors out the URL/status/body extraction pattern
+// shared by every endpoint wrapper so individual call sites stay
+// one-liners.
+//
+// Default mapping: status → Kind via ClassifyStatus. When no response
+// was received (status == 0, err != nil) the returned error has
+// Kind: KindOther and Body: err.Error(). When err is non-nil the
+// upstream ErrorResponse (if any) is the preferred body source — the
+// upstream client sometimes drains resp.Body during CheckResponse,
+// and the parsed Body / Message fields are the only thing left.
+//
+// Callers can refine the result with extraClassifiers, which run in
+// order after the default mapping and may mutate the *Error in place.
+// PostDiscussion uses this to remap 400 → KindConflict when the body
+// indicates a line-range error.
+func (c *Client) classify(method, url string, resp *gl.Response, err error, extraClassifiers ...func(*Error)) error {
+	status := 0
+	if resp != nil {
+		status = resp.StatusCode
 	}
-	return &Error{
-		Kind:       ClassifyStatus(status),
-		StatusCode: status,
+
+	e := &Error{
+		Kind:       KindOther,
 		Method:     method,
 		URL:        url,
-		Body:       truncateBody(body),
-		Cause:      cause,
+		StatusCode: status,
+		Cause:      err,
 	}
+	switch {
+	case status != 0:
+		// Got a response. Pick the best body source and the default
+		// kind from the status code.
+		e.Body = truncateBody(bodyFromResponse(resp, err))
+		e.Kind = ClassifyStatus(status)
+	case err != nil:
+		// No response — surface the transport error as the body so
+		// the caller has something concrete in logs.
+		e.Body = truncateBody(err.Error())
+	}
+	// Body is already truncated inside both branches; the else
+	// (status==0 && err==nil) path leaves Body empty.
+
+	for _, ec := range extraClassifiers {
+		ec(e)
+	}
+	return e
+}
+
+// bodyFromResponse picks the best available source for the response
+// body, in priority order:
+//
+//  1. The upstream ErrorResponse's Body field — set when the upstream
+//     client parsed the response body before returning. This is the
+//     only source left after upstream drains resp.Body during
+//     CheckResponse (the Discussions endpoint does this).
+//  2. The upstream ErrorResponse's Message field — set when the
+//     upstream client extracted just the message string.
+//  3. The live resp.Body — what the upstream leaves behind when it
+//     doesn't drain.
+//
+// Returns "" when none of the sources have content.
+func bodyFromResponse(resp *gl.Response, err error) string {
+	if errResp := asUpstreamError(err); errResp != nil {
+		if len(errResp.Body) > 0 {
+			return string(errResp.Body)
+		}
+		if errResp.Message != "" {
+			return errResp.Message
+		}
+	}
+	if resp != nil {
+		return readResponseBody(resp.Body)
+	}
+	return ""
+}
+
+// asUpstreamError extracts a *gl.ErrorResponse from the upstream
+// error chain. Returns nil when the error isn't an upstream one
+// (e.g. context cancellation, network error).
+func asUpstreamError(err error) *gl.ErrorResponse {
+	if err == nil {
+		return nil
+	}
+	var er *gl.ErrorResponse
+	if errors.As(err, &er) {
+		return er
+	}
+	return nil
 }
 
 // truncateBody caps the body stored in Error.Body at 4 KiB. Long

@@ -52,13 +52,14 @@ func (c *Client) FetchChanges(ctx context.Context, project string, iid int) ([]C
 
 	var result []ChangeFile
 	op := "FetchChanges"
+	url := fmt.Sprintf("%s/projects/%s/merge_requests/%d/diffs", c.baseURL, project, iid)
 	err := doWithRetry(ctx, c.retry, op, func(ctx context.Context, attempt int) error {
 		opts := &gl.ListMergeRequestDiffsOptions{
 			ListOptions: gl.ListOptions{PerPage: 100},
 		}
 		diffs, resp, err := c.inner.MergeRequests.ListMergeRequestDiffs(project, int64(iid), opts)
 		if err != nil {
-			return classifyChangesError(op, c.baseURL, project, iid, resp, err)
+			return c.classify(http.MethodGet, url, resp, err)
 		}
 		result = make([]ChangeFile, 0, len(diffs))
 		for _, d := range diffs {
@@ -84,22 +85,6 @@ func (c *Client) FetchChanges(ctx context.Context, project string, iid int) ([]C
 		return nil, err
 	}
 	return result, nil
-}
-
-// classifyChangesError is the changes-flavored sibling of
-// classifyFetchError. Kept separate because the URL shape differs.
-func classifyChangesError(op, baseURL, project string, iid int, resp *gl.Response, err error) error {
-	method := http.MethodGet
-	url := fmt.Sprintf("%s/projects/%s/merge_requests/%d/diffs", baseURL, project, iid)
-	status := 0
-	if resp != nil {
-		status = resp.StatusCode
-	}
-	body := ""
-	if resp != nil {
-		body = readResponseBody(resp.Body)
-	}
-	return classifyAndWrap(method, url, status, body, err)
 }
 
 // readResponseBody drains and returns the upstream response body. We

@@ -4,8 +4,6 @@ import (
 	"context"
 	"fmt"
 	"net/http"
-
-	gl "gitlab.com/gitlab-org/api/client-go"
 )
 
 // CurrentUser returns the authenticated user (the token holder).
@@ -17,10 +15,11 @@ import (
 func (c *Client) CurrentUser(ctx context.Context) (*User, error) {
 	var result *User
 	op := "CurrentUser"
+	url := fmt.Sprintf("%s/user", c.baseURL)
 	err := doWithRetry(ctx, c.retry, op, func(ctx context.Context, attempt int) error {
 		user, resp, err := c.inner.Users.CurrentUser()
 		if err != nil {
-			return classifyCurrentUserError(op, c.baseURL, resp, err)
+			return c.classify(http.MethodGet, url, resp, err)
 		}
 		result = &User{
 			Username: user.Username,
@@ -37,20 +36,4 @@ func (c *Client) CurrentUser(ctx context.Context) (*User, error) {
 		return nil, err
 	}
 	return result, nil
-}
-
-// classifyCurrentUserError maps the upstream CurrentUser error to
-// a typed *Error.
-func classifyCurrentUserError(op, baseURL string, resp *gl.Response, err error) error {
-	method := http.MethodGet
-	url := fmt.Sprintf("%s/user", baseURL)
-	status := 0
-	if resp != nil {
-		status = resp.StatusCode
-	}
-	respBody := ""
-	if resp != nil {
-		respBody = readResponseBody(resp.Body)
-	}
-	return classifyAndWrap(method, url, status, respBody, err)
 }
