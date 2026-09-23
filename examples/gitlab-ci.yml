@@ -1,57 +1,157 @@
 # GitLab CI integration for `mreview review`
 #
 # Drop this snippet into your project's `.gitlab-ci.yml` to
-# trigger an `mreview review` on every MR open / reopen / push
-# event. This is the right integration for teams that prefer
-# CI-driven review over a long-running `mreview serve` process.
+# trigger an `mreview review` on every MR open / reopen /
+# push event. This is the right integration for teams that
+# prefer CI-driven review over a long-running `mreview
+# serve` process.
 #
-# The job uses GitLab's `rules` to fire on MR pipeline events
-# (web + push + reopen + update). It posts inline comments and a
-# summary thread to the same MR via the API token in
-# GITLAB_TOKEN_CI.
+# Architecture (per #42, architecture reset):
 #
-# Authentication: the job uses a CI job token by default
-# (CI_JOB_TOKEN). mreview expects a Personal Access Token; set
-# GITLAB_TOKEN_CI as a CI/CD variable (Project → Settings →
-# CI/CD → Variables, masked, protected) with `api` scope.
+#   - Stage 1 runs the CI producer stages in parallel:
+#       go-build   → .mreview-artifacts/build.log
+#       go-test    → .mreview-artifacts/test_results.json
+#       golangci-lint → .mreview-artifacts/lint.json
+#       govulncheck → .mreview-artifacts/vulns.json
+#     Each stage produces an artifact that mreview reads at
+#     startup. The agent never re-runs these tools (it has no
+#     shell access; the tools are read-only by contract).
+#
+#   - Stage 2 runs mreview. It reads the artifacts from
+#     Stage 1, fetches the MR from GitLab, and asks the
+#     harness agent to produce inline + summary findings.
+#
+#   - The tokensave MCP server indexes the repo's code
+#     graph before the harness runs (one-shot; the
+#     subprocess is spawned by the harness library).
+#
+# Authentication: the job uses a Personal Access Token via
+# the GITLAB_TOKEN_CI variable (Project → Settings → CI/CD
+# → Variables, masked, protected, `api` scope).
 
+stages:
+  - build
+  - test
+  - lint
+  - vulns
+  - index
+  - review
+
+variables:
+  # The single artifacts directory mreview reads from.
+  MREVIEW_ARTIFACTS_DIR: .mreview-artifacts
+  # Operator-tunable. Tokensave's sync is incremental after
+  # the first run; on a cold cache it can take 1–3 min for
+  # a large repo.
+  TOKENSAVE_DB: .tokensave
+
+# ─── Stage 1: producer stages (run in parallel) ──────────────
+# Each producer writes one artifact. The `tee` / `|| true`
+# pattern lets the producer stage succeed (exit 0) even when
+# its tool reports a problem — the failure signal lives in
+# the artifact, which mreview reads at startup. mreview's
+# review-status exit code is independent of any individual
+# producer's exit code.
+
+go-build:
+  stage: build
+  image: golang:1.26
+  script:
+    - mkdir -p "$MREVIEW_ARTIFACTS_DIR"
+    - go build ./... 2>&1 | tee "$MREVIEW_ARTIFACTS_DIR/build.log"
+  artifacts:
+    paths:
+      - .mreview-artifacts/build.log
+    expire_in: 1 hour
+
+go-test:
+  stage: test
+  image: golang:1.26
+  script:
+    - mkdir -p "$MREVIEW_ARTIFACTS_DIR"
+    - go test -json -race -count=1 ./... > "$MREVIEW_ARTIFACTS_DIR/test_results.json" 2>&1 || true
+  artifacts:
+    paths:
+      - .mreview-artifacts/test_results.json
+    expire_in: 1 hour
+
+golangci-lint:
+  stage: lint
+  image: golangci/golangci-lint:latest
+  script:
+    - mkdir -p "$MREVIEW_ARTIFACTS_DIR"
+    - golangci-lint run --out-format=json ./... > "$MREVIEW_ARTIFACTS_DIR/lint.json" 2>&1 || true
+  artifacts:
+    paths:
+      - .mreview-artifacts/lint.json
+    expire_in: 1 hour
+
+govulncheck:
+  stage: vulns
+  image: golang:1.26
+  script:
+    - mkdir -p "$MREVIEW_ARTIFACTS_DIR"
+    - go install golang.org/x/vuln/cmd/govulncheck@latest
+    - govulncheck ./... > "$MREVIEW_ARTIFACTS_DIR/vulns.json" 2>&1 || true
+  artifacts:
+    paths:
+      - .mreview-artifacts/vulns.json
+    expire_in: 1 hour
+
+# ─── Stage 1.5: tokensave sync ─────────────────────────────────
+# One-shot indexing. The MCP server itself is spawned
+# inside mreview's runtime — this stage just primes the
+# cache so the agent's first code-graph query is fast.
+tokensave-sync:
+  stage: index
+  image: your-registry/tokensave:latest
+  script:
+    - tokensave sync --project-root "$CI_PROJECT_DIR" --db "$TOKENSAVE_DB"
+  cache:
+    key: tokensave-$CI_COMMIT_REF_SLUG
+    paths:
+      - .tokensave
+
+# ─── Stage 2: mreview ─────────────────────────────────────────
+# Per-event guard (issue #41) lives inside mreview itself,
+# not in the YAML's `rules:`. The CI YAML's rules filter
+# when mreview is invoked; mreview's internal guard handles
+# the rest. See README → "Behaviour by event".
 mreview:
   stage: review
   image: ghcr.io/inful/mreview:latest
   variables:
-    # Point mreview at the local LLM. In GitLab.com shared
-    # runners, localhost is the runner's loopback; for self-
-    # hosted runners, replace with your LLM host.
     LLM_URL: http://localhost:11434/v1
     LLM_MODEL: qwen2.5-coder:7b
   rules:
-    # Run on MR open, reopen, and update.
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
-      exists:
-        # Skip if there's no diff (e.g. source branch == target
-        # branch because the MR was just opened with a squash
-        # placeholder commit).
-        paths:
-          - "**/*"
+    - if: '$CI_PIPELINE_SOURCE == "web"'
+    - if: '$CI_PIPELINE_SOURCE == "api"'
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+  needs:
+    - go-build
+    - go-test
+    - golangci-lint
+    - govulncheck
+    - tokensave-sync
   script:
     - mreview review
         --repo="$CI_PROJECT_PATH"
         --mr="$CI_MERGE_REQUEST_IID"
         --gitlab-url="$CI_SERVER_URL"
         --gitlab-token="$GITLAB_TOKEN_CI"
-        --llm-url="$LLM_URL"
-        --llm-model="$LLM_MODEL"
+        --provider=local
+        --provider-base-url="$LLM_URL"
+        --model="$LLM_MODEL"
+        --workdir="$CI_PROJECT_DIR"
+        --artifacts-dir="$MREVIEW_ARTIFACTS_DIR"
         --log-format=json
-  # Optional: allow the job to fail without blocking the pipeline.
-  # Comment out to make the pipeline fail when mreview fails.
   allow_failure: true
-  # Resource hints. mreview is a single static binary — no
-  # special Kubernetes / Docker requirements.
   tags:
-    - docker  # whatever your runner tag is
+    - docker
 
-# Optional: surface the bot's MR URL in the pipeline output so
-# the developer can click through to the review from the
+# Surface the bot's MR URL in the pipeline output so the
+# developer can click through to the review from the
 # pipeline view.
 mreview-summary:
   stage: review
@@ -60,4 +160,5 @@ mreview-summary:
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
   script:
     - echo "Review posted to $CI_MERGE_REQUEST_PROJECT_URL/-/merge_requests/$CI_MERGE_REQUEST_IID"
-  needs: ["mreview"]
+  needs:
+    - mreview

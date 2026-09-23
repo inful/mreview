@@ -32,6 +32,7 @@ import (
 	"log/slog"
 	"strings"
 
+	"github.com/inful/mreview/internal/ci/artifact"
 	"github.com/inful/mreview/internal/diff"
 	"github.com/inful/mreview/internal/gitlab"
 	"github.com/inful/mreview/internal/policy"
@@ -96,7 +97,18 @@ type Config struct {
 	Policy      *policy.Policy
 	BotUsername string
 	DryRun      bool
-	Logger      *slog.Logger
+
+	// Artifacts carries the CI artifacts the central pipeline
+	// produced before mreview ran (build log, test results,
+	// lint, vulns). The orchestrator threads the set into
+	// the user prompt so the agent sees them at startup.
+	// Nil = no artifacts (dev / local CLI). The render
+	// still produces the "all NOT AVAILABLE" block in that
+	// case so the agent knows the artifacts are absent
+	// rather than just missing.
+	Artifacts *artifact.Set
+
+	Logger *slog.Logger
 }
 
 // Orchestrator is the new review orchestrator. Replaces
@@ -192,7 +204,15 @@ func (o *Orchestrator) Run(ctx context.Context, project string, iid int, action 
 		SourceBranch: mr.SourceBranch,
 		TargetBranch: mr.TargetBranch,
 	}
-	userPrompt := prompts.ReviewUserPrompt(meta, chunks)
+	artifactSet := o.cfg.Artifacts
+	if artifactSet == nil {
+		// Empty set — the prompt still renders the artifact
+		// block with all "NOT AVAILABLE" markers so the agent
+		// can distinguish "no artifacts configured" from
+		// "missing artifacts that should have been here".
+		artifactSet = &artifact.Set{}
+	}
+	userPrompt := prompts.ReviewUserPrompt(meta, chunks, *artifactSet)
 
 	// Run the harness agent.
 	logger.Info("running review agent", "system_prompt_bytes", len(prompts.ReviewSystemPrompt), "user_prompt_bytes", len(userPrompt))

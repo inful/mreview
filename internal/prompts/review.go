@@ -15,6 +15,7 @@ package prompts
 import (
 	"strings"
 
+	"github.com/inful/mreview/internal/ci/artifact"
 	"github.com/inful/mreview/internal/diff"
 )
 
@@ -86,13 +87,21 @@ posted as "error". Match your severity to the *strongest* verdict you expect.
 `
 
 // ReviewUserPrompt builds the user message from the MR
-// metadata + diff chunks. The function is a pure renderer —
-// no I/O, no logging — so tests can assert exact strings.
+// metadata + diff chunks + CI artifacts. The function is a
+// pure renderer — no I/O, no logging — so tests can assert
+// exact strings.
 //
 // The chunks argument is the output of diff.ChunkByFile. The
 // orchestrator passes the MR's diff there; this function turns
 // the chunks into labeled blocks the model can read.
-func ReviewUserPrompt(meta ReviewMetadata, chunks []diff.Chunk) string {
+//
+// The artifactSet argument carries the CI artifacts (build
+// log, test results, lint, vulns) the central pipeline
+// produced before mreview ran. A zero-value set still
+// renders the "all NOT AVAILABLE" block (see
+// RenderArtifactBlock) so the agent sees an explicit
+// "artifacts are absent" signal rather than an omission.
+func ReviewUserPrompt(meta ReviewMetadata, chunks []diff.Chunk, artifactSet artifact.Set) string {
 	var b strings.Builder
 	b.WriteString("Merge request: !")
 	b.WriteString(itoa(meta.IID))
@@ -113,6 +122,13 @@ func ReviewUserPrompt(meta ReviewMetadata, chunks []diff.Chunk) string {
 		b.WriteString(strings.TrimSpace(meta.Description))
 		b.WriteString("\n\n")
 	}
+
+	// CI artifact block goes BEFORE the diff so the agent
+	// reads the artifact status list first and self-
+	// calibrates confidence on findings that depend on
+	// them.
+	b.WriteString(RenderArtifactBlock(artifactSet))
+	b.WriteString("\n")
 
 	if len(chunks) == 0 {
 		b.WriteString("(no files changed)\n")
