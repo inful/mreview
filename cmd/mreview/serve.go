@@ -11,9 +11,6 @@ import (
 	"time"
 
 	"github.com/inful/mreview/internal/config"
-	"github.com/inful/mreview/internal/gitlab"
-	"github.com/inful/mreview/internal/llm"
-	"github.com/inful/mreview/internal/reviewer"
 	"github.com/inful/mreview/internal/server"
 )
 
@@ -72,67 +69,34 @@ func runServe(parentCtx context.Context, stdout io.Writer, c *ServeCmd, cfg *con
 		"queue_size", c.QueueSize,
 	)
 
-	glClient, err := gitlab.NewClient(c.GitLabURL, c.GitLabToken, gitlab.RetryConfig{
-		MaxAttempts:    c.Retries + 1,
-		InitialBackoff: c.RetryBackoff,
-		MaxBackoff:     30 * time.Second,
-		Logger:         logger,
-	}, logger)
-	if err != nil {
-		return logWithError(logger, ExitConfig, "build gitlab client", err)
-	}
-
-	llmProvider, err := llm.NewOpenAIProvider(llm.OpenAIConfig{
-		BaseURL:    c.LLMURL,
-		APIKey:     c.LLMAPIKey,
-		Model:      c.Model,
-		MaxRetries: 2,
+	rev, err := buildClients(clientDeps{
+		GitLabURL:        c.GitLabURL,
+		GitLabToken:      c.GitLabToken,
+		LLMURL:           c.LLMURL,
+		LLMAPIKey:        c.LLMAPIKey,
+		Model:            c.Model,
+		Temperature:      c.Temperature,
+		MaxTokens:        c.MaxTokens,
+		ReasoningEffort:  c.ReasoningEffort,
+		MaxDiffBytes:     c.MaxDiffBytes,
+		MaxBatchBytes:    c.MaxBatchBytes,
+		PerChunkTimeout:  c.PerChunkTimeout,
+		ChunkRetries:     c.ChunkRetries,
+		AllowPartial:     c.AllowPartial,
+		BotUsername:      c.BotUsername,
+		CommentMode:      c.CommentMode,
+		IgnorePaths:      c.IgnorePaths,
+		SystemPromptFile: c.SystemPromptFile,
+		UserPromptFile:   c.UserPromptFile,
+		Retries:          c.Retries,
+		RetryBackoff:     c.RetryBackoff,
+		// serve always runs real reviews; dry-run is review-only.
+		DryRun: false,
+		Logger: logger,
+		Config: cfg,
 	})
 	if err != nil {
-		return logWithError(logger, ExitConfig, "build llm provider", err)
-	}
-
-	mode, err := reviewer.ParseCommentMode(c.CommentMode)
-	if err != nil {
-		return logWithError(logger, ExitConfig, "invalid comment-mode", err)
-	}
-
-	systemSuffix, err := loadOptionalFile(c.SystemPromptFile, "system prompt")
-	if err != nil {
-		return logWithError(logger, ExitConfig, "load system prompt file", err)
-	}
-	userSuffix, err := loadOptionalFile(c.UserPromptFile, "user prompt")
-	if err != nil {
-		return logWithError(logger, ExitConfig, "load user prompt file", err)
-	}
-
-	// Apply LLM preset (CLI flags take precedence).
-	c.MaxBatchBytes, c.PerChunkTimeout, c.ReasoningEffort = resolveLLMSettings(
-		cfg, c.Model, c.MaxBatchBytes, c.PerChunkTimeout, c.ReasoningEffort, c.MaxTokens, logger,
-	)
-
-	rev, err := reviewer.NewReviewer(reviewer.Config{
-		GitLab:             glClient,
-		LLM:                llmProvider,
-		Model:              c.Model,
-		MaxDiffBytes:       c.MaxDiffBytes,
-		MaxBatchBytes:      c.MaxBatchBytes,
-		Temperature:        c.Temperature,
-		MaxTokens:          c.MaxTokens,
-		ReasoningEffort:    llm.ReasoningEffort(c.ReasoningEffort),
-		PerChunkTimeout:    c.PerChunkTimeout,
-		ChunkRetries:       c.ChunkRetries,
-		AllowPartial:       c.AllowPartial,
-		Logger:             logger,
-		DryRun:             false,
-		BotUsername:        c.BotUsername,
-		CommentMode:        mode,
-		IgnorePaths:        c.IgnorePaths,
-		SystemPromptSuffix: systemSuffix,
-		UserPromptSuffix:   userSuffix,
-	})
-	if err != nil {
-		return logWithError(logger, ExitConfig, "build reviewer", err)
+		return logWithError(logger, ExitConfig, err.Error(), err)
 	}
 
 	// Job handler: one ReviewMR per webhook. Errors are logged
