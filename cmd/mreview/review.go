@@ -72,6 +72,15 @@ type ReviewCmd struct {
 	// the review exit with ExitPolicy = 8.
 	PolicyFile string `name:"policy-file" env:"MREVIEW_POLICY_FILE" type:"path" help:"Path to a YAML policy file. Empty = no policy. See internal/policy for the schema."`
 
+	// Tokensave MCP integration (issue #42 step 4). The
+	// harness runtime spawns the tokensave subprocess and
+	// registers its tools under the mcp__tokensave__*
+	// namespace. Disable for repos where tokensave is
+	// unavailable (offline / air-gapped) or when the operator
+	// wants to fall back to read_file-only mode.
+	TokensaveEnabled bool   `default:"true" name:"tokensave-enabled" env:"MREVIEW_TOKENSAVE_ENABLED" help:"Enable the tokensave MCP server (the agent's primary code-graph tool). Default true."`
+	TokensaveBin     string `name:"tokensave-bin" env:"MREVIEW_TOKENSAVE_BIN" help:"Path to the tokensave binary (default: PATH-resolved 'tokensave'). Used when --tokensave-enabled is true."`
+
 	// Verbose is intentionally NOT declared here — it lives on
 	// the parent CLI struct so it's accepted globally.
 }
@@ -152,19 +161,21 @@ func runReview(parentCtx context.Context, stdout io.Writer, c *ReviewCmd, cfg *c
 	)
 
 	rev, err := buildReviewer(parentCtx, clientDeps{
-		GitLabURL:       c.GitLabURL,
-		GitLabToken:     c.GitLabToken,
-		ProviderName:    c.Provider,
-		ProviderAPIKey:  providerAPIKey(c.Provider),
-		ProviderBaseURL: c.BaseURL,
-		Model:           c.Model,
-		WorkDir:         c.WorkDir,
-		Policy:          pol,
-		BotUsername:     c.BotUsername,
-		DryRun:          c.DryRun,
-		Retries:         c.Retries,
-		RetryBackoff:    c.RetryBackoff,
-		Logger:          logger,
+		GitLabURL:        c.GitLabURL,
+		GitLabToken:      c.GitLabToken,
+		ProviderName:     c.Provider,
+		ProviderAPIKey:   providerAPIKey(c.Provider),
+		ProviderBaseURL:  c.BaseURL,
+		Model:            c.Model,
+		WorkDir:          c.WorkDir,
+		Policy:           pol,
+		BotUsername:      c.BotUsername,
+		DryRun:           c.DryRun,
+		Retries:          c.Retries,
+		RetryBackoff:     c.RetryBackoff,
+		TokensaveEnabled: c.TokensaveEnabled,
+		TokensaveBin:     c.TokensaveBin,
+		Logger:           logger,
 	})
 	if err != nil {
 		return logWithError(logger, ExitConfig, err.Error(), err)

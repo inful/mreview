@@ -11,11 +11,13 @@ import (
 	"github.com/sausheong/harness/runtime"
 	"github.com/sausheong/harness/tool"
 	"github.com/sausheong/harness/tools/file"
+	"github.com/sausheong/harness/tools/mcp"
 
 	"github.com/inful/mreview/internal/gitlab"
 	"github.com/inful/mreview/internal/policy"
 	"github.com/inful/mreview/internal/provider"
 	"github.com/inful/mreview/internal/reviewer"
+	"github.com/inful/mreview/internal/tokensave"
 )
 
 // clientDeps bundles the inputs buildReviewer needs to wire
@@ -47,7 +49,16 @@ type clientDeps struct {
 	DryRun       bool
 	Retries      int
 	RetryBackoff time.Duration
-	Logger       *slog.Logger
+
+	// Tokensave MCP integration (issue #42 step 4). When
+	// TokensaveEnabled is true (the default), the orchestrator
+	// spawns the tokensave subprocess and registers its tools
+	// under the mcp__tokensave__* namespace. TokensaveBin is the
+	// path to the binary; empty means PATH-resolved.
+	TokensaveEnabled bool
+	TokensaveBin     string
+
+	Logger *slog.Logger
 }
 
 // buildReviewer wires up everything the ReviewMR call needs:
@@ -107,16 +118,37 @@ func buildReviewer(ctx context.Context, deps clientDeps) (*reviewer.Orchestrator
 // read-only tool registry. The harness library owns the LLM
 // loop; mreview owns only the tool surface.
 //
-// Read-only contract (enforced by tests in orchestrator_test.go):
+// Read-only contract (enforced by tests in internal/reviewer):
 //   - read_file is the ONLY file tool registered.
 //   - harness's bash, edit_file, write_file tools are NOT
 //     registered (mreview never references them).
 //   - tokensave MCP server is registered when --tokensave-
-//     enabled=true (PR #4); the MCP server is a one-shot
-//     subprocess that the harness library owns.
+//     enabled=true; the MCP server is a one-shot subprocess
+//     that the harness library owns.
 func buildHarnessRuntime(ctx context.Context, llmProvider llm.LLMProvider, deps clientDeps) (*runtime.Runtime, error) {
 	reg := tool.NewRegistry()
 	reg.Register(&file.ReadFileTool{WorkDir: deps.WorkDir})
+
+	// Build the AgentSpec. Tokensave MCP server is registered
+	// when enabled; the harness library handles connection +
+	// tool namespacing + subprocess lifecycle (Runtime.Close
+	// releases it).
+	spec := runtime.AgentSpec{
+		ID:           "mreview",
+		Name:         "mreview",
+		Model:        deps.Model,
+		Workspace:    deps.WorkDir,
+		SystemPrompt: reviewSystemPrompt,
+		MaxTurns:     10,
+	}
+	if deps.TokensaveEnabled {
+		spec.MCPServers = []mcpServerConfig{
+			tokensave.SpawnMCPServer(tokensave.Config{
+				ProjectRoot: deps.WorkDir,
+				Bin:         deps.TokensaveBin,
+			}),
+		}
+	}
 
 	return runtime.BuildRuntime(
 		runtime.RuntimeDeps{},
@@ -124,16 +156,15 @@ func buildHarnessRuntime(ctx context.Context, llmProvider llm.LLMProvider, deps 
 			Provider: llmProvider,
 			Tools:    reg,
 		},
-		runtime.AgentSpec{
-			ID:           "mreview",
-			Name:         "mreview",
-			Model:        deps.Model,
-			Workspace:    deps.WorkDir,
-			SystemPrompt: reviewSystemPrompt,
-			MaxTurns:     10,
-		},
+		spec,
 	)
 }
+
+// mcpServerConfig is a type alias so we can swap the import
+// path without renaming the local symbol if the harness
+// library re-organises its packages in a future release.
+// Today it's just mcp.ServerConfig.
+type mcpServerConfig = mcp.ServerConfig
 
 // reviewSystemPrompt is a small wrapper around
 // prompts.ReviewSystemPrompt so the tool registry above can
