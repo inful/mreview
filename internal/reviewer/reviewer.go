@@ -23,172 +23,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
 	"strings"
-	"time"
-
-	"github.com/bmatcuk/doublestar/v4"
 
 	"github.com/inful/mreview/internal/gitlab"
 	"github.com/inful/mreview/internal/llm"
 )
-
-// Config is the constructor input for Reviewer. Zero-value is
-// invalid; callers should set every field.
-type Config struct {
-	// GitLab client (already configured with base URL + token).
-	GitLab *gitlab.Client
-
-	// LLM provider.
-	LLM llm.Provider
-
-	// Model name sent on every Chat call. Required (the OpenAI
-	// API requires a model even when the provider has a default).
-	Model string
-
-	// MaxDiffBytes is the per-chunk byte budget used by
-	// llm.ChunkByFile. Files exceeding this return an error
-	// (the operator must split the MR manually).
-	MaxDiffBytes int
-
-	// MaxBatchBytes is the byte budget for packing multiple
-	// chunks into one LLM call. When > 0, the reviewer greedily
-	// groups consecutive chunks whose total size fits within this
-	// budget, reducing call count for operators with large-
-	// context models. When 0 (the default), each chunk gets its
-	// own LLM call (the historical behaviour).
-	//
-	// Operators with high-context models should set this to
-	// roughly (context_window_tokens - max_tokens -
-	// prompt_overhead) * bytes_per_token. A preset layer
-	// computing this from a declared context window is filed as
-	// a follow-up.
-	MaxBatchBytes int
-
-	// Categories, when non-empty, override the default set in
-	// the system prompt. Use to scope the review (e.g. security
-	// only).
-	Categories []llm.Category
-
-	// IncludeDescription controls whether the MR description is
-	// prepended to the user prompt.
-	IncludeDescription bool
-
-	// Temperature / MaxTokens are forwarded to the LLM. Zero
-	// means "use the provider default".
-	Temperature float64
-	MaxTokens   int
-
-	// ReasoningEffort controls the reasoning budget for
-	// o-series-style models. Empty means "use the server's
-	// default". Forwarded to llm.ChatRequest.ReasoningEffort;
-	// providers that don't support the field ignore it.
-	ReasoningEffort llm.ReasoningEffort
-
-	// PerChunkTimeout is the per-LLM-call timeout. 0 means no
-	// per-call override (rely on context).
-	PerChunkTimeout time.Duration
-
-	// Logger receives progress lines (one per chunk fetch /
-	// chunk review / post). nil falls back to slog.Default().
-	Logger *slog.Logger
-
-	// DryRun, when true, logs every GitLab POST the reviewer
-	// would make and skips the actual call. The LLM still runs.
-	DryRun bool
-
-	// BotUsername is the username the reviewer's GitLab token
-	// posts as. Used by the dedupe layer to ignore comments
-	// authored by other humans — only the bot's prior comments
-	// form the fingerprint baseline.
-	//
-	// When empty, every existing comment counts as the bot's
-	// (useful in tests; conservative in production because
-	// humans may have posted their own review notes that won't
-	// match any finding).
-	BotUsername string
-
-	// CommentMode controls what gets posted to GitLab. Default
-	// (zero value) is CommentModeBoth — both the summary note
-	// and inline findings. Operators can restrict to one or the
-	// other for cost or noise reasons.
-	CommentMode CommentMode
-
-	// IgnorePaths is a list of doublestar glob patterns. Files
-	// whose path matches ANY pattern are dropped from the diff before
-	// chunking. Empty means review everything.
-	//
-	// Supports the full doublestar syntax (`**`, `*`, `?`,
-	// character classes). Common patterns:
-	//   - "**/*.pb.go"          — generated protobuf files
-	//   - "vendor/**"            — Go vendor directory
-	//   - "**/generated/**"      — anything under any generated/
-	IgnorePaths []string
-
-	// SystemPromptSuffix is operator-supplied text appended to
-	// the system prompt AFTER the system-owned schema and rules.
-	// Use for documentation standards, language-specific dependency
-	// preferences, team conventions, etc. Empty = no team guidance.
-	//
-	// The system-owned prefix (JSON schema, output format,
-	// severity semantics) is always emitted and cannot be replaced.
-	// Operators cannot accidentally break parsing by editing
-	// this string.
-	SystemPromptSuffix string
-
-	// UserPromptSuffix is operator-supplied text appended to
-	// the user prompt AFTER the diff chunks. Use for per-MR
-	// context (e.g. "this PR is a WIP, focus on architecture not
-	// naming"). Empty = no extra context.
-	UserPromptSuffix string
-}
-
-// CommentMode selects which kinds of comments mreview posts.
-// The zero value (CommentModeBoth) preserves the original
-// behavior; explicit names exist for flag binding.
-type CommentMode int
-
-const (
-	// CommentModeBoth posts the summary note + one inline
-	// discussion per finding. This is the default behavior.
-	CommentModeBoth CommentMode = iota
-	// CommentModeInlineOnly posts inline discussions but
-	// skips the summary note. Useful when a separate system
-	// owns the summary comment.
-	CommentModeInlineOnly
-	// CommentModeSummaryOnly posts the summary note but skips
-	// inline findings. Useful when the bot is being used as a
-	// "triage only" pre-filter and a human does the line-level
-	// review.
-	CommentModeSummaryOnly
-)
-
-// String returns the kebab-case name for flag binding.
-func (c CommentMode) String() string {
-	switch c {
-	case CommentModeInlineOnly:
-		return "inline-only"
-	case CommentModeSummaryOnly:
-		return "summary-only"
-	default:
-		return "both"
-	}
-}
-
-// ParseCommentMode parses a kebab-case name back into a
-// CommentMode. Used by the CLI layer to decode --comment-mode.
-func ParseCommentMode(s string) (CommentMode, error) {
-	switch strings.ToLower(strings.TrimSpace(s)) {
-	case "", "both":
-		return CommentModeBoth, nil
-	case "inline-only", "inline":
-		return CommentModeInlineOnly, nil
-	case "summary-only", "summary":
-		return CommentModeSummaryOnly, nil
-	default:
-		return CommentModeBoth, fmt.Errorf("reviewer: unknown comment-mode %q (want both|inline-only|summary-only)", s)
-	}
-}
 
 // Reviewer is the orchestrator. Construct one with NewReviewer,
 // then call ReviewMR for each MR.
@@ -204,47 +43,10 @@ type Reviewer struct {
 
 // NewReviewer validates cfg and returns a Reviewer.
 func NewReviewer(cfg Config) (*Reviewer, error) {
-	if cfg.GitLab == nil {
-		return nil, errors.New("reviewer: Config.GitLab is required")
-	}
-	if cfg.LLM == nil {
-		return nil, errors.New("reviewer: Config.LLM is required")
-	}
-	if strings.TrimSpace(cfg.Model) == "" {
-		return nil, errors.New("reviewer: Config.Model is required")
-	}
-	if cfg.MaxDiffBytes <= 0 {
-		return nil, fmt.Errorf("reviewer: Config.MaxDiffBytes must be > 0, got %d", cfg.MaxDiffBytes)
-	}
-	if cfg.Logger == nil {
-		cfg.Logger = slog.Default()
+	if err := validateConfig(cfg); err != nil {
+		return nil, err
 	}
 	return &Reviewer{cfg: cfg}, nil
-}
-
-// Result is what ReviewMR returns to the caller.
-//
-//   - MR: the GitLab merge-request projection.
-//   - Findings: one per llm.Finding the reviewer tried to post.
-//     Discussion is nil when the post was skipped (KindConflict,
-//     file-not-in-diff, dedupe hit, etc.); Reason carries why.
-//   - Summary: the summary note (or nil when --dry-run).
-//   - DedupeSize: number of prior bot-authored comments that were
-//     used as the dedupe baseline (0 when the MR is fresh).
-type Result struct {
-	MR         *gitlab.MergeRequest
-	Findings   []PostedFinding
-	Summary    *gitlab.Note
-	DedupeSize int
-}
-
-// PostedFinding is the per-finding outcome: what we wanted to post,
-// what we did post (or why we skipped it).
-type PostedFinding struct {
-	Finding    llm.Finding
-	Discussion *gitlab.Discussion // nil if skipped
-	Skipped    bool
-	Reason     string // populated when Skipped
 }
 
 // ReviewMR runs the full pipeline for one MR.
@@ -509,6 +311,10 @@ func (r *Reviewer) reviewChunks(ctx context.Context, mr *gitlab.MergeRequest, ch
 // consolidate combines per-chunk ReviewResponses into a single
 // verdict. Single-chunk case returns the chunk response directly;
 // multi-chunk case asks the LLM to merge the summaries.
+//
+// When the merge call fails or the merged response drops findings,
+// consolidate falls back to mergedFallback so the user always gets
+// a usable result.
 func (r *Reviewer) consolidate(ctx context.Context, mr *gitlab.MergeRequest, chunks []llm.ReviewResponse) (llm.ReviewResponse, error) {
 	if len(chunks) == 0 {
 		return llm.ReviewResponse{}, errors.New("reviewer: no chunk responses to consolidate")
@@ -547,15 +353,12 @@ func (r *Reviewer) consolidate(ctx context.Context, mr *gitlab.MergeRequest, chu
 		Timeout:         r.cfg.PerChunkTimeout,
 	})
 	if err != nil {
-		// Fallback: assemble manually so the user gets the
-		// findings even if the merge call fails.
+		// Fallback: concatenate per-chunk summaries so the user
+		// gets findings even if the merge call fails.
 		r.cfg.Logger.Warn("merge call failed; using raw concatenation",
 			"err", err.Error(),
 		)
-		return llm.ReviewResponse{
-			Findings: allFindings,
-			Summary:  strings.TrimSpace(summaries.String()),
-		}, nil
+		return mergedFallback(allFindings, summaries.String()), nil
 	}
 
 	r.cfg.Logger.Debug("llm merge raw response",
@@ -565,10 +368,7 @@ func (r *Reviewer) consolidate(ctx context.Context, mr *gitlab.MergeRequest, chu
 
 	parsed, err := llm.ParseReviewResponse(resp.Content)
 	if err != nil {
-		return llm.ReviewResponse{
-			Findings: allFindings,
-			Summary:  strings.TrimSpace(summaries.String()),
-		}, nil
+		return mergedFallback(allFindings, summaries.String()), nil
 	}
 	// If the merge dropped findings, restore them. Conservative:
 	// the union of inputs wins.
@@ -578,340 +378,12 @@ func (r *Reviewer) consolidate(ctx context.Context, mr *gitlab.MergeRequest, chu
 	return parsed, nil
 }
 
-// batchChunks groups consecutive chunks into batches. When
-// maxBytes > 0, small chunks are greedily packed together as long
-// as the sum of their Size stays under maxBytes — this lets
-// operators with large-context models collapse N file-level
-// reviews into fewer LLM calls. When maxBytes <= 0, every chunk
-// gets its own batch (one call per chunk) — the historical
-// behaviour, preserved as the default for backwards compatibility.
-//
-// A single chunk larger than maxBytes is placed alone in its own
-// batch so it still gets reviewed; the LLM is the one that fails
-// if it can't fit, and that failure surfaces the same way as any
-// other chunk-level error.
-func batchChunks(chunks []llm.Chunk, maxBytes int) [][]llm.Chunk {
-	if len(chunks) == 0 {
-		return nil
+// mergedFallback assembles a ReviewResponse from accumulated
+// inputs when the merge LLM call fails or the merged response drops
+// entries. Used by consolidate as the unified fallback path.
+func mergedFallback(findings []llm.Finding, summaries string) llm.ReviewResponse {
+	return llm.ReviewResponse{
+		Findings: findings,
+		Summary:  strings.TrimSpace(summaries),
 	}
-	if maxBytes <= 0 {
-		// No packing: one batch per chunk (original behaviour).
-		out := make([][]llm.Chunk, len(chunks))
-		for i, c := range chunks {
-			out[i] = []llm.Chunk{c}
-		}
-		return out
-	}
-	// Greedy pack: walk chunks in order, accumulate into the
-	// current batch until adding the next chunk would exceed
-	// maxBytes. Then flush and start a new batch. Ordering is
-	// preserved (chunks within a batch are in the same order as
-	// the input slice) so the LLM sees a coherent diff narrative.
-	var batches [][]llm.Chunk
-	var current []llm.Chunk
-	currentBytes := 0
-	for _, c := range chunks {
-		size := chunkBytes(c)
-		if len(current) > 0 && currentBytes+size > maxBytes {
-			batches = append(batches, current)
-			current = nil
-			currentBytes = 0
-		}
-		current = append(current, c)
-		currentBytes += size
-	}
-	if len(current) > 0 {
-		batches = append(batches, current)
-	}
-	return batches
-}
-
-// chunkBytes returns the budget contribution of one chunk. We use
-// Chunk.Size when populated (it's the canonical value set by
-// ChunkByFile / wrapDiffWithHeader) and fall back to len(Diff) for
-// chunks constructed by hand in tests.
-func chunkBytes(c llm.Chunk) int {
-	if c.Size > 0 {
-		return c.Size
-	}
-	return len(c.Diff)
-}
-
-// chunkFileList renders the file paths in a batch as a comma-
-// separated string suitable for log output. Capped at the first
-// `maxChunkLogFiles` entries with an "(N more)" tail to keep log
-// lines bounded when a batch contains many chunks. Today
-// batchChunks emits one chunk per batch, but the batching API
-// supports packing small chunks together — this helper stays
-// correct if that optimization lands later.
-func chunkFileList(chunks []llm.Chunk) string {
-	const maxChunkLogFiles = 5
-	if len(chunks) == 0 {
-		return ""
-	}
-	files := make([]string, 0, len(chunks))
-	for i, c := range chunks {
-		if i >= maxChunkLogFiles {
-			files = append(files, fmt.Sprintf("(%d more)", len(chunks)-maxChunkLogFiles))
-			break
-		}
-		files = append(files, c.File)
-	}
-	return strings.Join(files, ",")
-}
-
-// pathIndex returns the set of file paths present in the diff.
-// Used to filter out LLM-hallucinated paths.
-func pathIndex(changes []gitlab.ChangeFile) map[string]bool {
-	out := make(map[string]bool, len(changes))
-	for _, c := range changes {
-		out[c.Path()] = true
-	}
-	return out
-}
-
-// fileMetaIndex returns the per-file diff metadata, keyed by
-// canonical path (Path() returns NewPath when present, else
-// OldPath). Used by postFinding to construct the correct
-// position shape for the GitLab /discussions endpoint —
-// new / modified / deleted / renamed each require a different
-// combination of new_path / old_path / new_line / old_line.
-func fileMetaIndex(changes []gitlab.ChangeFile) map[string]gitlab.ChangeFile {
-	out := make(map[string]gitlab.ChangeFile, len(changes))
-	for _, c := range changes {
-		out[c.Path()] = c
-	}
-	return out
-}
-
-// countDiffLines returns the total number of newline characters
-// across all change diffs. Used to decide whether the LLM's zero
-// findings output is suspicious — a "looks clean" reply on a
-// 5-line diff is normal; on a 500-line diff it's almost always a
-// regression. Newlines are a cheap, format-agnostic proxy for diff
-// size; counting `+` / `-` lines would require parsing and isn't
-// worth it for a sanity check.
-func countDiffLines(changes []gitlab.ChangeFile) int {
-	n := 0
-	for _, c := range changes {
-		n += strings.Count(c.Diff, "\n")
-	}
-	return n
-}
-
-// filterFindings drops findings that:
-//   - cite a file path not in the diff (hallucination)
-//   - have an empty body
-//   - have an out-of-range line (negative)
-//
-// The remaining findings pass through to the poster.
-func filterFindings(in []llm.Finding, validFiles map[string]bool, logger *slog.Logger) []llm.Finding {
-	out := make([]llm.Finding, 0, len(in))
-	for _, f := range in {
-		if strings.TrimSpace(f.Body) == "" {
-			logger.Debug("drop finding: empty body", "file", f.File)
-			continue
-		}
-		if !validFiles[f.File] {
-			logger.Warn("drop finding: file not in diff (LLM hallucination?)",
-				"file", f.File, "line", f.Line,
-			)
-			continue
-		}
-		if f.Line < 0 {
-			logger.Debug("drop finding: negative line", "file", f.File, "line", f.Line)
-			continue
-		}
-		out = append(out, f)
-	}
-	return out
-}
-
-// formatFindings renders a findings list as a compact block for
-// the merge prompt. One finding per line.
-func formatFindings(fs []llm.Finding) string {
-	var b strings.Builder
-	for i, f := range fs {
-		fmt.Fprintf(&b, "%d. %s:%d [%s/%s] %s\n",
-			i+1, f.File, f.Line, f.Severity, f.Category, f.Body)
-	}
-	return b.String()
-}
-
-// buildMergePrompt composes the (system, user) prompt pair that
-// asks the LLM to consolidate per-chunk ReviewResponses into one
-// final verdict. The schema is included inline (not just described)
-// because observed behavior: when the schema is implied, merge
-// LLMs occasionally rename "body" to "message" or "description",
-// and the downstream filterFindings() drops anything with an empty
-// Body. Pinning the field names explicitly makes the merge LLM
-// preserve them.
-//
-// Extracted as a helper so tests can assert the schema is present
-// without driving a full consolidate() call.
-func buildMergePrompt(mr *gitlab.MergeRequest, chunks []llm.ReviewResponse) (system, user string) {
-	var summaries strings.Builder
-	var allFindings []llm.Finding
-	for i, c := range chunks {
-		fmt.Fprintf(&summaries, "Chunk %d summary: %s\n", i+1, c.Summary)
-		allFindings = append(allFindings, c.Findings...)
-	}
-
-	system = "You are merging per-chunk code review outputs into one verdict. " +
-		"Output ONLY a JSON object matching the ReviewResponse schema below — " +
-		"every field name must match exactly so the result can be parsed:\n\n" +
-		"{\n" +
-		`  "findings": [` + "\n" +
-		"    {\n" +
-		`      "file": "<path at HEAD>",` + "\n" +
-		`      "line": <1-indexed line number>,` + "\n" +
-		`      "severity": "info" | "warning" | "error",` + "\n" +
-		`      "category": "<one of: security, correctness, style, perf, test, docs>",` + "\n" +
-		`      "body": "<one or two sentences of markdown — REQUIRED, do NOT rename to 'message' or 'description'>",` + "\n" +
-		`      "suggestion": "<optional code block; empty string if none>"` + "\n" +
-		"    }\n" +
-		"  ],\n" +
-		`  "summary": "<one consolidated paragraph>"` + "\n" +
-		"}\n\n" +
-		"Preserve every finding from the inputs — do not drop any. " +
-		"Every field above (file, line, severity, category, body, suggestion) " +
-		"must be carried through verbatim; renaming 'body' to 'message' will " +
-		"cause the finding to be silently dropped on the reviewer side.\n\n" +
-		"STRICT OUTPUT RULE: This is a reducer, not a generator. Emit ONLY " +
-		"findings that already appear in the 'Combined findings' list in the " +
-		"user message below — do not synthesise new findings based on your own " +
-		"assessment of the MR. If you cannot point a claim at a specific " +
-		"file:line from the input list, omit it. The observed failure mode " +
-		"otherwise is hallucinated claims (e.g. \"the MR contains no Go code\" " +
-		"when it clearly does) that the reviewer has no way to catch downstream."
-
-	user = fmt.Sprintf(
-		"MR: !%d %q\n\nPer-chunk summaries:\n%s\n\nCombined findings (count=%d):\n%s\n\nEmit the merged JSON object.",
-		mr.IID, mr.Title, summaries.String(), len(allFindings), formatFindings(allFindings),
-	)
-	return system, user
-}
-
-// dedupeFindings collapses findings that share (file, line, body).
-// Used by consolidate when the merge dropped entries.
-func dedupeFindings(in []llm.Finding) []llm.Finding {
-	seen := make(map[string]bool, len(in))
-	out := make([]llm.Finding, 0, len(in))
-	for _, f := range in {
-		key := strings.TrimSpace(f.File) + "|" + fmt.Sprint(f.Line) + "|" + strings.TrimSpace(f.Body)
-		if seen[key] {
-			continue
-		}
-		seen[key] = true
-		out = append(out, f)
-	}
-	return out
-}
-
-// dedupeAgainstSet drops findings whose body fingerprint already
-// exists in the bot's prior comments. Returns the surviving
-// findings.
-func dedupeAgainstSet(in []llm.Finding, fpSet *fingerprintSet, logger *slog.Logger) []llm.Finding {
-	out := make([]llm.Finding, 0, len(in))
-	for _, f := range in {
-		if fpSet.Contains(f) {
-			logger.Debug("dedupe: skip finding (already posted)",
-				"file", f.File, "line", f.Line,
-			)
-			continue
-		}
-		out = append(out, f)
-	}
-	return out
-}
-
-// countPosted returns the number of PostedFinding entries with a
-// non-nil Discussion.
-func countPosted(pfs []PostedFinding) int {
-	n := 0
-	for _, pf := range pfs {
-		if pf.Discussion != nil {
-			n++
-		}
-	}
-	return n
-}
-
-// truncateForLog is a small helper for logging the raw LLM output
-// when parsing fails. Bounded so we don't blow up logs.
-func truncateForLog(s string) string {
-	const logMax = 1000
-	if len(s) <= logMax {
-		return s
-	}
-	return s[:logMax] + "...(truncated)"
-}
-
-// shouldPostSummary decides whether to post the summary note for
-// this review action.
-//
-//   - "open" / "reopen" → post (the MR is freshly active; the
-//     human reviewer benefits from a fresh verdict).
-//   - "update" → skip (every push would pile up a fresh
-//     summary in the timeline; inline findings carry the per-
-//     push signal).
-//   - empty / unknown → post (the standalone `mreview review`
-//     CLI is operator-driven; they expect a complete report).
-func shouldPostSummary(action string) bool {
-	switch action {
-	case "update":
-		return false
-	default:
-		// "open", "reopen", "", anything else
-		return true
-	}
-}
-
-// filterChangesByPath drops change files whose path matches any
-// of the supplied glob patterns. Returns a new slice; input is
-// unchanged.
-//
-// Pattern semantics:
-//   - `*.pb.go` — exact match against any path segment (Go's
-//     path.Match)
-//   - `vendor/**` — matches anything under vendor/ (we translate
-//     `**` into "any characters")
-//   - `**/generated/**` — matches anywhere in the tree
-//
-// We don't pull in a full doublestar library to keep the binary
-// small — the common patterns (vendor/, *.pb.go, generated/) all
-// work with the simple translation below.
-func filterChangesByPath(in []gitlab.ChangeFile, patterns []string) []gitlab.ChangeFile {
-	if len(patterns) == 0 {
-		return in
-	}
-	out := make([]gitlab.ChangeFile, 0, len(in))
-	for _, c := range in {
-		if matchesAny(c.Path(), patterns) {
-			continue
-		}
-		out = append(out, c)
-	}
-	return out
-}
-
-// matchesAny reports whether path matches any doublestar glob
-// pattern. Patterns support the full doublestar syntax
-// (`**/*.pb.go`, `vendor/**`, `**/generated/**`, character
-// classes, etc.).
-//
-// A malformed pattern (e.g. unmatched `[`) is silently skipped
-// — operators can fix the pattern, but a typo shouldn't silently
-// drop files from the review.
-func matchesAny(path string, patterns []string) bool {
-	for _, pattern := range patterns {
-		ok, err := doublestar.PathMatch(pattern, path)
-		if err != nil {
-			continue
-		}
-		if ok {
-			return true
-		}
-	}
-	return false
 }

@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"log/slog"
 	"strings"
 
 	"github.com/inful/mreview/internal/gitlab"
@@ -112,4 +113,21 @@ func (f *fingerprintSet) String() string {
 		return "<nil>"
 	}
 	return fmt.Sprintf("fingerprintSet{bot=%q, size=%d}", f.bot, f.Size())
+}
+
+// dedupeAgainstSet drops findings whose body fingerprint already
+// exists in the bot's prior comments. Returns the surviving
+// findings.
+func dedupeAgainstSet(in []llm.Finding, fpSet *fingerprintSet, logger *slog.Logger) []llm.Finding {
+	out := make([]llm.Finding, 0, len(in))
+	for _, f := range in {
+		if fpSet.Contains(f) {
+			logger.Debug("dedupe: skip finding (already posted)",
+				"file", f.File, "line", f.Line,
+			)
+			continue
+		}
+		out = append(out, f)
+	}
+	return out
 }
