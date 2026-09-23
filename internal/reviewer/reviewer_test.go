@@ -189,6 +189,58 @@ func TestReviewMR_HappyPath(t *testing.T) {
 	}
 }
 
+// TestReviewMR_ContextCancellation_AbortsPromptly confirms that
+// ReviewMR propagates context cancellation through to the GitLab
+// and LLM HTTP calls. This is the contract the cmd layer relies on
+// for SIGINT (^C) to interrupt an in-flight review — main.go wires
+// signal.NotifyContext around the ctx passed to runReview, and
+// runReview passes that same ctx to ReviewMR. If this test fails,
+// ^C won't interrupt the running process.
+//
+// We use an already-cancelled context and assert ReviewMR returns
+// within a short bound, with an error that wraps context.Canceled.
+// (The error type isn't strictly required by any caller today, but
+// the prompt return is the user-facing signal.)
+func TestReviewMR_ContextCancellation_AbortsPromptly(t *testing.T) {
+	g := newFakeGitLab(t)
+	g.enqueue(http.StatusOK, mrFixture)
+	g.enqueue(http.StatusOK, changesFixture)
+	l := newFakeLLM(t, `{"findings":[],"summary":"x"}`)
+
+	glt, _ := gitlab.NewClient(g.URL, "test-token", gitlab.RetryConfig{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	p, _ := llm.NewOpenAIProvider(llm.OpenAIConfig{BaseURL: l.URL, APIKey: "k", Model: "m"})
+
+	r, err := NewReviewer(Config{
+		GitLab: glt, LLM: p, Model: "m", MaxDiffBytes: 4096,
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	if err != nil {
+		t.Fatalf("NewReviewer: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	done := make(chan struct{})
+	var reviewErr error
+	go func() {
+		_, reviewErr = r.ReviewMR(ctx, "group/project", 42)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		if reviewErr == nil {
+			t.Fatal("expected error from cancelled context, got nil")
+		}
+		if !errors.Is(reviewErr, context.Canceled) {
+			t.Errorf("expected error wrapping context.Canceled; got %v (type %T)", reviewErr, reviewErr)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("ReviewMR did not return within 2s after cancellation — ctx is not propagated")
+	}
+}
+
 func TestReviewMR_DryRun_NoPosts(t *testing.T) {
 	g := newFakeGitLab(t)
 	g.enqueue(http.StatusOK, mrFixture)
