@@ -7,7 +7,6 @@ import (
 	"os"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/inful/mreview/internal/config"
 )
@@ -28,7 +27,9 @@ func TestRun_HelpFlagExitsZeroAndListsSubcommands(t *testing.T) {
 	if code != ExitOK {
 		t.Errorf("--help returned %d, want %d", code, ExitOK)
 	}
-	for _, want := range []string{"review", "serve", "doctor", "--log-format"} {
+	// After #42's reset, `serve` is dropped. The remaining
+	// subcommands are `review` and `doctor`.
+	for _, want := range []string{"review", "doctor", "--log-format"} {
 		if !strings.Contains(stdout, want) {
 			t.Errorf("--help output missing %q\n%s", want, stdout)
 		}
@@ -126,31 +127,21 @@ func TestRun_ReviewSubcommand_InvalidMR(t *testing.T) {
 }
 
 func TestRun_ServeSubcommand_ParsesFlags(t *testing.T) {
-	// serve blocks until the context is cancelled. Run it in a
-	// goroutine and cancel to drive shutdown.
-	ctx, cancel := context.WithCancel(context.Background())
-	stdout := &bytes.Buffer{}
-	stderr := &bytes.Buffer{}
-	done := make(chan int, 1)
-	go func() {
-		done <- run(ctx, []string{
-			"serve",
-			"--addr=:0",
-			"--webhook-secret=test-secret",
-			"--queue-size=4",
-			"--log-format=json",
-		}, stdout, stderr)
-	}()
-	// Give it a moment to log then cancel.
-	time.Sleep(50 * time.Millisecond)
-	cancel()
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("serve did not exit after context cancel")
+	// After #42's reset, `mreview serve` is dropped. The
+	// subcommand must reject the invocation with a
+	// configuration error (kong doesn't recognise the name).
+	_, stderr, code := runWithArgs(t,
+		"serve",
+		"--addr=:0",
+		"--webhook-secret=test-secret",
+		"--queue-size=4",
+		"--log-format=json",
+	)
+	if code != ExitConfig {
+		t.Errorf("serve after reset returned %d, want %d (config)", code, ExitConfig)
 	}
-	if !strings.Contains(stderr.String(), "serve: starting") {
-		t.Errorf("expected 'serve: starting' log line, got: %s", stderr.String())
+	if !strings.Contains(stderr, "unexpected argument") {
+		t.Errorf("expected 'unexpected argument' in stderr, got: %s", stderr)
 	}
 }
 
@@ -165,13 +156,9 @@ func TestRun_ConfigFile_InjectsDefaults(t *testing.T) {
 gitlab:
   url: https://config-gitlab.example.com
   token_env: MY_GITLAB_TOKEN
-llm:
-  base_url: http://config-llm:9999/v1
+provider:
+  base_url: http://config-provider:9999/v1
   model: config-model:7b
-review:
-  max_diff_bytes: 50000
-  per_chunk_timeout: 30s
-  temperature: 0.5
 `
 	if err := osWriteFile(cfgPath, []byte(yaml), 0o600); err != nil {
 		t.Fatalf("write config: %v", err)
@@ -187,18 +174,15 @@ review:
 			"--config=" + cfgPath,
 			"doctor",
 			"--skip-gitlab",
+			"--skip-provider",
 			"--log-format=json",
 		}, stdout, stderr,
 	)
-	// doctor will try to hit the LLM URL from the config. The LLM
-	// is unreachable so we expect a non-zero exit. The point of
-	// this test is that the dispatch happened with config values
-	// (no parse error).
 	if code == ExitConfig {
 		t.Errorf("expected dispatch to succeed (config loaded), got ExitConfig\nstderr: %s", stderr.String())
 	}
-	if !strings.Contains(stderr.String(), "config-llm:9999") {
-		t.Errorf("expected config-supplied LLM URL in logs, got: %s", stderr.String())
+	if !strings.Contains(stderr.String(), "config-gitlab.example.com") {
+		t.Errorf("expected config-supplied GitLab URL in logs, got: %s", stderr.String())
 	}
 }
 
@@ -208,11 +192,9 @@ func TestRun_ConfigFile_CLIOverridesConfig(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := dir + "/config.yaml"
 	yaml := `
-llm:
-  base_url: http://config-llm:9999/v1
+provider:
+  base_url: http://config-provider:9999/v1
   model: config-model:7b
-review:
-  max_diff_bytes: 50000
 `
 	if err := osWriteFile(cfgPath, []byte(yaml), 0o600); err != nil {
 		t.Fatalf("write config: %v", err)
@@ -221,7 +203,7 @@ review:
 
 	stdout := &bytes.Buffer{}
 	stderr := &bytes.Buffer{}
-	// Override --max-diff-bytes via CLI. The config says 50000.
+	// Override --model via CLI. The config says config-model:7b.
 	code := run(context.Background(),
 		[]string{
 			"--config=" + cfgPath,
@@ -229,13 +211,10 @@ review:
 			"--repo=foo/bar",
 			"--mr=42",
 			"--gitlab-token=test",
-			"--max-diff-bytes=999000", // override
+			"--model=cli-model:7b", // override
 			"--log-format=json",
 		}, stdout, stderr,
 	)
-	// We don't care about the exit code (review will fail because
-	// the LLM is unreachable). We care that the override was
-	// accepted without a parse error.
 	if code == ExitConfig {
 		t.Errorf("config + CLI override should parse, got ExitConfig\nstderr: %s", stderr.String())
 	}
@@ -251,7 +230,7 @@ func TestRun_ConfigFile_MissingFile_ReturnsConfigError(t *testing.T) {
 			"--config=/nonexistent/path/config.yaml",
 			"doctor",
 			"--skip-gitlab",
-			"--skip-llm",
+			"--skip-provider",
 			"--log-format=json",
 		}, stdout, stderr,
 	)
@@ -297,8 +276,10 @@ gitlab:
 	}
 }
 
-// TestRun_ConfigFile_WebhookSecretEnvCopy covers the server-side
-// indirection.
+// TestRun_ConfigFile_WebhookSecretEnvCopy is a regression test
+// for the deprecated server block — after #42, this binding is
+// gone, but old config files referencing the block should still
+// parse (the binding table no longer sets the env var).
 func TestRun_ConfigFile_WebhookSecretEnvCopy(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := dir + "/config.yaml"
@@ -314,8 +295,11 @@ server:
 
 	applyConfigToEnv(mustLoadConfig(t, cfgPath))
 
-	if got := os.Getenv("GITLAB_WEBHOOK_SECRET"); got != "webhook-secret-value" {
-		t.Errorf("GITLAB_WEBHOOK_SECRET = %q, want from MY_WEBHOOK_SECRET", got)
+	// After the architecture reset, GITLAB_WEBHOOK_SECRET is no
+	// longer auto-set from server.webhook_secret_env (the serve
+	// mode is gone). The variable stays empty.
+	if got := os.Getenv("GITLAB_WEBHOOK_SECRET"); got != "" {
+		t.Errorf("GITLAB_WEBHOOK_SECRET = %q, want empty (server block removed)", got)
 	}
 }
 
@@ -401,25 +385,9 @@ func TestApplyConfigToEnv_IntegerFields(t *testing.T) {
 	// defaults. Load("") would populate defaults and make
 	// assertions like "MREVIEW_RETRIES == empty" meaningless.
 	cfg := configFileForTest()
-	cfg.Review.MaxDiffBytes = 123456
-	cfg.Review.Temperature = 0.7
-	cfg.Review.MaxTokens = 4096
-	cfg.Server.QueueSize = 64
 	cfg.Retry.MaxAttempts = 7 // --retries should be 6
 	applyConfigToEnv(&cfg)
 
-	if got := os.Getenv("MREVIEW_MAX_DIFF_BYTES"); got != "123456" {
-		t.Errorf("MREVIEW_MAX_DIFF_BYTES = %q, want 123456", got)
-	}
-	if got := os.Getenv("MREVIEW_TEMPERATURE"); got != "0.7" {
-		t.Errorf("MREVIEW_TEMPERATURE = %q, want 0.7", got)
-	}
-	if got := os.Getenv("MREVIEW_MAX_TOKENS"); got != "4096" {
-		t.Errorf("MREVIEW_MAX_TOKENS = %q, want 4096", got)
-	}
-	if got := os.Getenv("MREVIEW_QUEUE_SIZE"); got != "64" {
-		t.Errorf("MREVIEW_QUEUE_SIZE = %q, want 64", got)
-	}
 	// MaxAttempts=7 → CLI --retries=6 → MREVIEW_RETRIES=6.
 	if got := os.Getenv("MREVIEW_RETRIES"); got != "6" {
 		t.Errorf("MREVIEW_RETRIES = %q, want 6 (MaxAttempts-1)", got)
@@ -447,26 +415,12 @@ func TestApplyConfigToEnv_ExhaustiveBindings(t *testing.T) {
 			URL:      "https://gitlab.example.com",
 			TokenEnv: "MY_GITLAB_TOKEN",
 		},
-		LLM: config.LLMConfig{
-			BaseURL:   "http://llm.example.com",
-			APIKeyEnv: "MY_LLM_API_KEY",
-			Model:     "qwen-test",
+		Provider: config.ProviderConfig{
+			BaseURL: "http://provider.example.com",
+			Model:   "qwen-test",
 		},
 		Review: config.ReviewConfig{
-			MaxDiffBytes:    123456,
-			Temperature:     0.7,
-			MaxTokens:       4096,
-			BotUsernameEnv:  "review-bot",
-			PerChunkTimeout: "120s",
-			ChunkRetries:    3,
-			AllowPartial:    true,
-		},
-		Server: config.ServerConfig{
-			Addr:             ":8080",
-			WebhookSecretEnv: "MY_WEBHOOK_SECRET",
-			QueueSize:        64,
-			Workers:          8,
-			ShutdownTimeout:  "30s",
+			BotUsernameEnv: "review-bot",
 		},
 		Retry: config.RetryConfig{
 			MaxAttempts:    7, // → MREVIEW_RETRIES=6
@@ -475,37 +429,20 @@ func TestApplyConfigToEnv_ExhaustiveBindings(t *testing.T) {
 		},
 	}
 
-	// Set the indirection env vars so TokenEnv / APIKeyEnv /
-	// WebhookSecretEnv lookups resolve.
+	// Set the indirection env vars so TokenEnv resolves.
 	t.Setenv("MY_GITLAB_TOKEN", "secret-token")
-	t.Setenv("MY_LLM_API_KEY", "secret-key")
-	t.Setenv("MY_WEBHOOK_SECRET", "secret-webhook")
 
 	cleanup := applyConfigToEnv(cfg)
 	defer cleanup()
 
 	want := map[string]string{
 		// GitLab.
-		"GITLAB_URL":            "https://gitlab.example.com",
-		"GITLAB_TOKEN":          "secret-token",
-		"GITLAB_BOT_USERNAME":   "review-bot",
-		"GITLAB_WEBHOOK_SECRET": "secret-webhook",
-		// LLM.
-		"LLM_URL":     "http://llm.example.com",
-		"LLM_API_KEY": "secret-key",
-		"LLM_MODEL":   "qwen-test",
-		// Review tunables.
-		"MREVIEW_MAX_DIFF_BYTES":    "123456",
-		"MREVIEW_TEMPERATURE":       "0.7",
-		"MREVIEW_MAX_TOKENS":        "4096",
-		"MREVIEW_PER_CHUNK_TIMEOUT": "120s",
-		"MREVIEW_CHUNK_RETRIES":     "3",
-		"MREVIEW_ALLOW_PARTIAL":     "true",
-		// Server.
-		"MREVIEW_ADDR":             ":8080",
-		"MREVIEW_QUEUE_SIZE":       "64",
-		"MREVIEW_WORKERS":          "8",
-		"MREVIEW_SHUTDOWN_TIMEOUT": "30s",
+		"GITLAB_URL":          "https://gitlab.example.com",
+		"GITLAB_TOKEN":        "secret-token",
+		"GITLAB_BOT_USERNAME": "review-bot",
+		// Provider.
+		"MREVIEW_PROVIDER_BASE_URL": "http://provider.example.com",
+		"MREVIEW_MODEL":             "qwen-test",
 		// Retry.
 		"MREVIEW_RETRIES":           "6", // MaxAttempts - 1
 		"MREVIEW_RETRY_BACKOFF":     "500ms",
@@ -525,25 +462,13 @@ func TestApplyConfigToEnv_ExhaustiveBindings(t *testing.T) {
 // configure, or they'd silently win over explicit CLI flags.
 func TestApplyConfigToEnv_SkipsZeroValues(t *testing.T) {
 	cfg := configFileForTest() // every field at zero
-	t.Setenv("MREVIEW_MAX_DIFF_BYTES", "")
-	t.Setenv("MREVIEW_TEMPERATURE", "")
-	t.Setenv("MREVIEW_QUEUE_SIZE", "")
-	t.Setenv("MREVIEW_WORKERS", "")
-	t.Setenv("MREVIEW_CHUNK_RETRIES", "")
 	t.Setenv("MREVIEW_RETRIES", "")
-	t.Setenv("MREVIEW_ALLOW_PARTIAL", "")
 
 	cleanup := applyConfigToEnv(&cfg)
 	defer cleanup()
 
 	skipped := []string{
-		"MREVIEW_MAX_DIFF_BYTES",
-		"MREVIEW_TEMPERATURE",
-		"MREVIEW_QUEUE_SIZE",
-		"MREVIEW_WORKERS",
-		"MREVIEW_CHUNK_RETRIES",
 		"MREVIEW_RETRIES",
-		"MREVIEW_ALLOW_PARTIAL",
 	}
 	for _, k := range skipped {
 		if got := os.Getenv(k); got != "" {
@@ -556,23 +481,25 @@ func TestRun_DoctorSubcommand_ParsesFlags(t *testing.T) {
 	_, _, code := runWithArgs(t,
 		"doctor",
 		"--skip-gitlab",
-		"--llm-url=http://localhost:1",
+		"--provider=local",
+		"--provider-base-url=http://localhost:1",
 		"--log-format=json",
 	)
-	// doctor with --skip-gitlab will still hit LLM and may fail
-	// on the unreachable localhost:1. We just want the flags to
-	// parse and the subcommand to dispatch. Either ExitInternal
-	// (LLM unreachable) or ExitOK (LLM unreachable but ping fell
-	// back) are acceptable as long as dispatch worked.
-	if code != ExitOK && code != ExitInternal {
-		t.Errorf("doctor returned %d, want ok or internal", code)
+	// After #42's reset, `mreview doctor` no longer hits the
+	// provider's connectivity (harness library doesn't expose
+	// that). The provider Build just constructs the client.
+	// So with --skip-gitlab and a local provider, doctor
+	// always succeeds (the connectivity check happens at
+	// review time).
+	if code != ExitOK {
+		t.Errorf("doctor returned %d, want 0", code)
 	}
 }
 
 func TestRun_DoctorSubcommand_MissingGitLabToken(t *testing.T) {
 	stdout, _, code := runWithArgs(t,
 		"doctor",
-		"--skip-llm",
+		"--skip-provider",
 		"--log-format=json",
 	)
 	if code != ExitInternal {
@@ -591,7 +518,7 @@ func TestRun_DoctorSubcommand_AllChecksSkipped(t *testing.T) {
 	stdout, _, code := runWithArgs(t,
 		"doctor",
 		"--skip-gitlab",
-		"--skip-llm",
+		"--skip-provider",
 		"--log-format=json",
 	)
 	if code != ExitOK {

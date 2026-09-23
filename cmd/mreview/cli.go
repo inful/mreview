@@ -46,8 +46,7 @@ type CLI struct {
 
 	// Subcommands. Each is a flag-bag struct dispatched from main.go.
 	Review *ReviewCmd `cmd:"review" help:"Review a merge request once and exit."`
-	Serve  *ServeCmd  `cmd:"serve"  help:"Run an HTTP server that consumes GitLab webhooks."`
-	Doctor *DoctorCmd `cmd:"doctor" help:"Validate config + LLM + GitLab connectivity."`
+	Doctor *DoctorCmd `cmd:"doctor" help:"Validate config + provider + GitLab connectivity."`
 }
 
 // resolveConfigPath returns the config file path the user wants to
