@@ -51,6 +51,25 @@ type PromptOptions struct {
 	// (e.g. "this PR is a WIP, focus on architecture not naming").
 	// Empty means no extra context.
 	UserPromptSuffix string
+
+	// PriorFindings lists findings produced by earlier batches
+	// in the same MR (batches reviewed before this one). When
+	// non-empty, the user prompt gets a "Findings from previous
+	// batches" section prepended so the chunk LLM has ground
+	// truth about the file scope and types already seen.
+	//
+	// Why: when a batch contains only, say, .md files and
+	// produces zero findings, the model reviewing a later
+	// batch of .go files has no signal that Go files exist in
+	// the MR — its inputs only contain its own slice of the
+	// diff. Without this section the model may hallucinate
+	// claims like "the MR contains no Go code" during the
+	// merge step because nothing in the per-batch summaries
+	// or final findings references Go files either.
+	//
+	// Empty on the first batch. Defaults to nil/empty on
+	// single-batch MRs (no behaviour change).
+	PriorFindings []Finding
 }
 
 // defaultCategories is the vocabulary embedded in the system
@@ -95,7 +114,7 @@ func BuildReviewPrompt(meta ReviewMetadata, chunks []Chunk, opts PromptOptions) 
 	}
 
 	system = buildSystemPrompt(cats, opts.SystemPromptSuffix)
-	user = buildUserPrompt(meta, chunks, opts.IncludeMRDescription, opts.UserPromptSuffix)
+	user = buildUserPrompt(meta, chunks, opts.IncludeMRDescription, opts.UserPromptSuffix, opts.PriorFindings)
 	return system, user, nil
 }
 
@@ -152,7 +171,7 @@ func buildSystemPrompt(categories []Category, suffix string) string {
 
 // buildUserPrompt composes the per-MR user message, optionally
 // followed by operator-supplied team context.
-func buildUserPrompt(meta ReviewMetadata, chunks []Chunk, includeDescription bool, suffix string) string {
+func buildUserPrompt(meta ReviewMetadata, chunks []Chunk, includeDescription bool, suffix string, priorFindings []Finding) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Merge request: !%d %q by %s (%s -> %s)\n\n",
 		meta.IID, meta.Title, meta.Author, meta.SourceBranch, meta.TargetBranch)
@@ -161,6 +180,14 @@ func buildUserPrompt(meta ReviewMetadata, chunks []Chunk, includeDescription boo
 		b.WriteString("Description:\n")
 		b.WriteString(strings.TrimSpace(meta.Description))
 		b.WriteString("\n\n")
+	}
+
+	if len(priorFindings) > 0 {
+		b.WriteString("Findings from previous batches (read these for context — do NOT duplicate or re-emit; only emit findings for files in THIS batch's 'Files changed' section below):\n\n")
+		for _, f := range priorFindings {
+			writeFinding(&b, f)
+		}
+		b.WriteString("\n")
 	}
 
 	b.WriteString("Files changed:\n\n")
@@ -211,4 +238,15 @@ func toStringSlice(cs []Category) []string {
 		out[i] = string(c)
 	}
 	return out
+}
+
+// writeFinding emits one prior-batch finding as a compact one-line
+// record for the "Findings from previous batches" section. Format
+// keeps the token cost low while preserving file/line/severity/
+// category/body — the four fields the chunk LLM needs to (a) avoid
+// re-emitting the same finding, and (b) reason about the file
+// scope and types the merge step will see.
+func writeFinding(b *strings.Builder, f Finding) {
+	fmt.Fprintf(b, "- %s:%d [%s/%s] %s\n",
+		f.File, f.Line, f.Severity, f.Category, strings.TrimSpace(f.Body))
 }

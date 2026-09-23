@@ -300,11 +300,25 @@ func (r *Reviewer) ReviewMR(ctx context.Context, project string, iid int, action
 	// Run the LLM per chunk (or one merged call if there's only
 	// one chunk). Each call returns a ReviewResponse; we
 	// accumulate findings + summaries for the final merge.
+	//
+	// For multi-batch MRs, each batch's prompt carries the
+	// findings from previous batches as a "Findings from previous
+	// batches" section. This gives the chunk LLM ground truth
+	// about file scope/types already seen, so it (and the merge
+	// step downstream) cannot hallucinate claims like "the MR
+	// contains no Go code" when its own batch was, say, only
+	// markdown. See llm.PromptOptions.PriorFindings for the
+	// root-cause write-up.
 	chunkResponses := make([]llm.ReviewResponse, 0, len(chunks))
+	var priorFindings []llm.Finding
 	for idx, chunkBatch := range batchChunks(chunks, r.cfg.MaxBatchBytes) {
-		logger.Info("reviewing chunk batch", "batch", idx+1, "chunks", len(chunkBatch))
+		logger.Info("reviewing chunk batch",
+			"batch", idx+1,
+			"chunks", len(chunkBatch),
+			"prior_findings", len(priorFindings),
+		)
 
-		resp, err := r.reviewChunks(ctx, mr, chunkBatch)
+		resp, err := r.reviewChunks(ctx, mr, chunkBatch, priorFindings)
 		if err != nil {
 			// A single failed chunk doesn't fail the whole review —
 			// we log and substitute an empty response so the summary
@@ -321,6 +335,12 @@ func (r *Reviewer) ReviewMR(ctx context.Context, project string, iid int, action
 			continue
 		}
 		chunkResponses = append(chunkResponses, resp)
+		// Accumulate for the next batch's prompt. We deliberately
+		// do NOT dedupe here — the chunk LLM only needs enough
+		// context to know what files have been touched and what
+		// kinds of issues have been raised. Dedup happens against
+		// GitLab discussions after the merge step.
+		priorFindings = append(priorFindings, resp.Findings...)
 	}
 
 	// Merge: if multiple chunk responses, ask the LLM to
@@ -418,7 +438,14 @@ func (r *Reviewer) ReviewMR(ctx context.Context, project string, iid int, action
 // reviewChunks runs one LLM call against one batch of chunks and
 // returns the parsed ReviewResponse. Batches let the reviewer push
 // multiple small files into a single prompt when they all fit.
-func (r *Reviewer) reviewChunks(ctx context.Context, mr *gitlab.MergeRequest, chunks []llm.Chunk) (llm.ReviewResponse, error) {
+//
+// The priorFindings argument carries findings from earlier batches
+// in the same MR (batches 1..N-1 in the caller's loop). It is
+// threaded into the user prompt as a "Findings from previous
+// batches" section so the chunk LLM has ground truth about the
+// file scope already covered. Pass nil on the first batch (single-
+// batch MRs always pass nil).
+func (r *Reviewer) reviewChunks(ctx context.Context, mr *gitlab.MergeRequest, chunks []llm.Chunk, priorFindings []llm.Finding) (llm.ReviewResponse, error) {
 	meta := llm.ReviewMetadata{
 		IID:          mr.IID,
 		Title:        mr.Title,
@@ -432,6 +459,7 @@ func (r *Reviewer) reviewChunks(ctx context.Context, mr *gitlab.MergeRequest, ch
 		IncludeMRDescription: r.cfg.IncludeDescription,
 		SystemPromptSuffix:   r.cfg.SystemPromptSuffix,
 		UserPromptSuffix:     r.cfg.UserPromptSuffix,
+		PriorFindings:        priorFindings,
 	})
 	if err != nil {
 		return llm.ReviewResponse{}, err

@@ -354,3 +354,87 @@ func TestBuildReviewPrompt_FindingsArePrimary(t *testing.T) {
 		}
 	}
 }
+
+// TestBuildReviewPrompt_PriorFindings_EmptyOmitted: when no
+// prior findings are passed (the single-batch case), no
+// "Findings from previous batches" section is emitted. This
+// pins the behaviour for single-batch MRs and the first batch
+// of multi-batch MRs — adding the section unconditionally
+// would add token cost with no benefit on the first call.
+func TestBuildReviewPrompt_PriorFindings_EmptyOmitted(t *testing.T) {
+	_, user, err := BuildReviewPrompt(sampleMeta(), sampleChunks(), PromptOptions{})
+	if err != nil {
+		t.Fatalf("BuildReviewPrompt: %v", err)
+	}
+	if strings.Contains(user, "Findings from previous batches") {
+		t.Errorf("user prompt emitted prior-findings section when PriorFindings is empty/nil")
+	}
+}
+
+// TestBuildReviewPrompt_PriorFindings_AppearInUserPrompt: when
+// prior findings are passed, the user prompt carries a
+// "Findings from previous batches" section that includes every
+// prior finding's file, line, severity, category, and body.
+// This is the root-cause fix for the merge-LLM "no Go code"
+// hallucination — see PromptOptions.PriorFindings for the
+// write-up.
+func TestBuildReviewPrompt_PriorFindings_AppearInUserPrompt(t *testing.T) {
+	prior := []Finding{
+		{
+			File:     "cmd/pim/main.go",
+			Line:     42,
+			Severity: SeverityWarning,
+			Category: CategoryCorrectness,
+			Body:     "missing nil check on err",
+		},
+		{
+			File:     "pkg/gl/client.go",
+			Line:     17,
+			Severity: SeverityError,
+			Category: CategorySecurity,
+			Body:     "API token leaked in error path",
+		},
+	}
+	_, user, err := BuildReviewPrompt(sampleMeta(), sampleChunks(), PromptOptions{
+		PriorFindings: prior,
+	})
+	if err != nil {
+		t.Fatalf("BuildReviewPrompt: %v", err)
+	}
+	for _, want := range []string{
+		"Findings from previous batches",
+		"cmd/pim/main.go:42",
+		"pkg/gl/client.go:17",
+		"missing nil check on err",
+		"API token leaked in error path",
+	} {
+		if !strings.Contains(user, want) {
+			t.Errorf("user prompt missing prior-finding fragment %q", want)
+		}
+	}
+}
+
+// TestBuildReviewPrompt_PriorFindings_BeforeDiff: the prior-
+// findings section is positioned BEFORE the "Files changed"
+// section so the chunk LLM reads it as context, not as
+// post-diff commentary. (Otherwise later batches see "Files
+// changed: ..." first and may treat prior findings as a
+// comment to echo rather than context to reason about.)
+func TestBuildReviewPrompt_PriorFindings_BeforeDiff(t *testing.T) {
+	_, user, err := BuildReviewPrompt(sampleMeta(), sampleChunks(), PromptOptions{
+		PriorFindings: []Finding{
+			{File: "cmd/x.go", Line: 1, Severity: SeverityInfo, Category: CategoryStyle, Body: "minor"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("BuildReviewPrompt: %v", err)
+	}
+	priorIdx := strings.Index(user, "Findings from previous batches")
+	filesIdx := strings.Index(user, "Files changed:")
+	if priorIdx < 0 || filesIdx < 0 {
+		t.Fatalf("user prompt missing expected sections; prior=%d files=%d", priorIdx, filesIdx)
+	}
+	if priorIdx > filesIdx {
+		t.Errorf("prior-findings section (idx %d) must appear BEFORE 'Files changed' (idx %d)", priorIdx, filesIdx)
+	}
+}
