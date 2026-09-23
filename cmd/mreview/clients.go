@@ -16,6 +16,7 @@ import (
 	"github.com/inful/mreview/internal/ci/artifact"
 	"github.com/inful/mreview/internal/gitlab"
 	"github.com/inful/mreview/internal/policy"
+	"github.com/inful/mreview/internal/prompts"
 	"github.com/inful/mreview/internal/provider"
 	"github.com/inful/mreview/internal/reviewer"
 	"github.com/inful/mreview/internal/tokensave"
@@ -145,7 +146,7 @@ func buildHarnessRuntime(ctx context.Context, llmProvider llm.LLMProvider, deps 
 		Name:         "mreview",
 		Model:        deps.Model,
 		Workspace:    deps.WorkDir,
-		SystemPrompt: reviewSystemPrompt,
+		SystemPrompt: prompts.ReviewSystemPrompt(),
 		MaxTurns:     10,
 	}
 	if deps.TokensaveEnabled {
@@ -172,33 +173,6 @@ func buildHarnessRuntime(ctx context.Context, llmProvider llm.LLMProvider, deps 
 // library re-organises its packages in a future release.
 // Today it's just mcp.ServerConfig.
 type mcpServerConfig = mcp.ServerConfig
-
-// reviewSystemPrompt is a small wrapper around
-// prompts.ReviewSystemPrompt so the tool registry above can
-// reference it without an import cycle. Kept as a thin
-// wrapper; PR #6 will move the prompt out of this file.
-var reviewSystemPrompt = stringPrompt()
-
-// stringPrompt returns the system prompt as a string for
-// runtime.AgentSpec.SystemPrompt. The harness library
-// expects a string here; the prompts package owns the full
-// content (which is large — see internal/prompts/review.go).
-func stringPrompt() string {
-	return reviewSystemPromptText
-}
-
-// reviewSystemPromptText is set from internal/prompts at
-// startup via SetReviewSystemPrompt. Avoids an import cycle
-// (cmd/mreview imports internal/reviewer; internal/prompts
-// doesn't import cmd/mreview).
-var reviewSystemPromptText string
-
-// SetReviewSystemPrompt wires the prompts-package text into
-// the runtime.AgentSpec at startup. Called from main.go
-// before buildHarnessRuntime is invoked.
-func SetReviewSystemPrompt(text string) {
-	reviewSystemPromptText = text
-}
 
 // ParseCommentMode kept for the ReviewCmd enum binding; the
 // review subcommand no longer uses comment-mode (PR #3 wires

@@ -13,78 +13,36 @@
 package prompts
 
 import (
+	_ "embed"
 	"strings"
 
 	"github.com/inful/mreview/internal/ci/artifact"
 	"github.com/inful/mreview/internal/diff"
 )
 
-// ReviewSystemPrompt is the static system prompt for the
-// review agent. Stable across turns so the harness's prompt-
-// cache prefix stays valid (one of the locked decisions in #42
-// is "prompt-cache discipline" — harness gives this for free,
+// reviewSystemMarkdown is the source-of-truth for the agent's
+// system prompt. Embedded into the binary at build time so
+// the orchestrator doesn't need filesystem access at runtime.
+//
+// Stable across turns so the harness's prompt-cache prefix
+// stays valid (one of the locked decisions in #42 is
+// "prompt-cache discipline" — harness gives this for free,
 // but only if the system prompt is stable).
 //
-// The prompt is large because the agent has to internalise the
-// finding schema, severity semantics, and the read-only tool
-// contract. It is the single most important file in the
-// codebase for review quality; pin changes here through tests
-// in PR #6.
-const ReviewSystemPrompt = `You are a senior code reviewer reviewing a GitLab merge request.
+// Pin changes here through golden-file tests
+// (internal/prompts/review_test.go) — review quality is
+// downstream of this exact wording.
+//
+//go:embed review_system.md
+var reviewSystemMarkdown string
 
-TOOL SURFACE — read-only by contract:
-- read_file: for raw source, configs, READMEs the agent needs verbatim
-- mcp__tokensave__smart_context: code-graph queries ("what does this code do / what depends on it")
-- mcp__tokensave__semantic_search: semantic search across the codebase
-- mcp__tokensave__impact_analysis: blast radius ("if I change this, what breaks")
-
-You do NOT have shell access. You do NOT have write/edit tools. You do NOT re-run CI tools
-the pipeline already ran (build, test, lint, vulncheck). CI artifacts are pre-loaded
-into your context. Do not invoke external commands. Do not propose edits — your role
-is review, not fix.
-
-OUTPUT FORMAT — strict JSON, no prose, no Markdown fences:
-{
-  "findings": [
-    {
-      "file": "<path at HEAD>",
-      "line": <1-indexed line number>,
-      "severity": "info" | "warning" | "error",
-      "category": "<one of: security, correctness, style, perf, test, docs>",
-      "body": "<one or two sentences of markdown>",
-      "suggestion": "<optional code block; empty string if none>"
-    }
-  ],
-  "summary": "<one paragraph verdict for the MR overall>"
+// ReviewSystemPrompt returns the static system prompt for
+// the review agent. Kept as a function (not a const) so
+// future enhancements (per-language overlays, etc.) can
+// keep the same call site.
+func ReviewSystemPrompt() string {
+	return reviewSystemMarkdown
 }
-
-RULES:
-- Every file path must match exactly one of the paths in the diff.
-- Line numbers are 1-indexed and refer to the file at HEAD.
-- severity "error" = blocker (do not merge). "warning" = must fix before merge. "info" = nit.
-- Be terse. One finding per real issue. Skip trivial style nits unless they obscure a bug.
-- Every finding must reference a specific file:line from the diff and explain a real issue.
-- The findings array is the primary output. Each concrete issue MUST appear as a finding.
-- The summary is a SHORT narrative recap (2-4 sentences); it does NOT substitute for findings.
-- Every issue in the summary MUST have a matching finding with a specific file:line. Drop
-  unmatched claims from the summary too.
-- An empty findings array is ONLY valid when the diff is genuinely clean. In that case,
-  emit summary as a single short sentence ("LGTM, no issues found").
-- A long summary that describes real issues alongside empty findings is malformed; do not
-  produce that.
-- State explicitly when a finding's corroboration depends on a CI artifact that was
-  marked NOT AVAILABLE or malformed in the loaded context.
-
-CI ARTIFACTS — when the orchestrator pre-loads build.log, test_results.json, lint.json,
-vulns.json into your context, you can reason about them. Cite them in findings when
-they're decisive. If an artifact is marked NOT AVAILABLE or malformed, your confidence
-in findings that would have depended on it must drop — say so in the finding body.
-
-POLICY — when the orchestrator pre-loads a policy.yaml, the policy's verdict (info /
-warning / error) is binding. Findings you produce at "info" that the policy escalates to
-"error" (because the file matches a severity_override or the MR carries a label) will be
-posted as "error". Match your severity to the *strongest* verdict you expect.
-`
 
 // ReviewUserPrompt builds the user message from the MR
 // metadata + diff chunks + CI artifacts. The function is a

@@ -215,8 +215,8 @@ func (o *Orchestrator) Run(ctx context.Context, project string, iid int, action 
 	userPrompt := prompts.ReviewUserPrompt(meta, chunks, *artifactSet)
 
 	// Run the harness agent.
-	logger.Info("running review agent", "system_prompt_bytes", len(prompts.ReviewSystemPrompt), "user_prompt_bytes", len(userPrompt))
-	raw, err := o.cfg.Runner.RunSync(ctx, prompts.ReviewSystemPrompt, userPrompt)
+	logger.Info("running review agent", "system_prompt_bytes", len(prompts.ReviewSystemPrompt()), "user_prompt_bytes", len(userPrompt))
+	raw, err := o.cfg.Runner.RunSync(ctx, prompts.ReviewSystemPrompt(), userPrompt)
 	if err != nil {
 		return nil, fmt.Errorf("orchestrator: runner: %w", err)
 	}
