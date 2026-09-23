@@ -1,22 +1,28 @@
 # mreview
 
-Automated LLM merge-request reviewer for GitLab.
+A thin GitLab-CI review orchestrator. mreview fetches the diff for a
+merge request, hands it to a [harness](https://github.com/sausheong/harness)-
+driven LLM agent (with [tokensave](https://tokensave.dev/) as its primary
+code-graph tool), and posts the result back to the MR as inline line
+comments plus a summary thread.
 
-`mreview` fetches the diff for a merge request, sends it to a local LLM
-(Ollama, llama.cpp, vLLM, LM Studio — any OpenAI-compatible endpoint), and
-posts the result back to the MR as inline line comments plus a summary
-thread.
-
-Single static Go binary. No daemons, no cloud dependency, no data leaves
-your network.
+Architecture reset as of v0.6.0 ([#42](https://github.com/inful/mreview/issues/42)):
+mreview is now a CI-only orchestrator with a strictly read-only agent
+tool surface. The `mreview serve` mode is dropped; CI is the canonical
+run mode, and the central CI definition (the example in
+`examples/central-ci.yml`) handles onboarding.
 
 ```text
-$ ./mreview review --repo=group/project --mr=42 --dry-run --log-format=json
-{"time":"...","level":"INFO","msg":"starting review","repo":"group/project","mr":42,...}
-{"time":"...","level":"INFO","msg":"fetched MR","title":"Add caching layer","state":"opened"}
-{"time":"...","level":"INFO","msg":"chunked diff","chunks":3}
-{"time":"...","level":"INFO","msg":"reviewing chunk batch","batch":1,"chunks":1}
-{"time":"...","level":"INFO","msg":"review complete","findings_total":2,"findings_posted":2,"summary_posted":true}
+$ ./mreview review --repo=group/project --mr=42 --provider=local \
+    --provider-base-url=http://localhost:11434/v1 \
+    --workdir=$PWD --artifacts-dir=.mreview-artifacts \
+    --tokensave-enabled=true --log-format=json
+{"time":"...","level":"INFO","msg":"per-event guard","source":"merge_request_event"}
+{"time":"...","level":"INFO","msg":"policy loaded","severity_overrides":2}
+{"time":"...","level":"INFO","msg":"artifacts loaded","build":"present","tests":"missing"}
+{"time":"...","level":"INFO","msg":"starting review","repo":"group/project","mr":42,"provider":"local"}
+{"time":"...","level":"INFO","msg":"running review agent","system_prompt_bytes":3217,"user_prompt_bytes":1894}
+{"time":"...","level":"INFO","msg":"review complete","findings":2,"summary_posted":true,"policy_error":false}
 https://gitlab.example.com/group/project/-/merge_requests/42
 ```
 
@@ -29,12 +35,12 @@ https://gitlab.example.com/group/project/-/merge_requests/42
 - [Subcommands](#subcommands)
 - [Behaviour by event](#behaviour-by-event)
 - [Policy enforcement](#policy-enforcement)
+- [Read-only tool surface](#read-only-tool-surface)
+- [CI artifact reuse](#ci-artifact-reuse)
 - [What the bot posts](#what-the-bot-posts)
 - [Exit codes](#exit-codes)
-- [GitLab webhook setup (for `serve`)](#gitlab-webhook-setup-for-serve)
 - [Configuration](#configuration)
-- [Customizing the prompts](#customizing-the-prompts)
-- [LLM presets](#llm-presets)
+- [Onboarding via central CI](#onboarding-via-central-ci)
 - [Architecture](#architecture)
 - [Performance & cost](#performance--cost)
 - [Examples](#examples)
@@ -47,56 +53,77 @@ https://gitlab.example.com/group/project/-/merge_requests/42
 
 ## Why mreview
 
-- **Local-first.** No data leaves your machine — the LLM runs on your
-  hardware, the GitLab token never reaches a third party.
-- **Idempotent.** Re-running on the same MR posts only new findings; the
-  fingerprint-based dedupe layer (SHA-256 of normalized body + author
-  filter) skips anything the bot already commented on.
-- **Resilient.** JSON from local LLMs is messy; the parser handles raw
-  output, fenced blocks, bare arrays, and prose-wrapped JSON. Per-finding
-  line-out-of-range errors are skipped without failing the review.
-- **Multi-LLM.** Same binary talks to Ollama, llama.cpp, vLLM, or LM
-  Studio via the OpenAI-compatible `/v1` endpoint — no provider SDK.
-- **Single static binary.** CGO disabled, distroless base image, ~20 MB
-  compressed; runs anywhere.
+- **CI-first, single-binary.** One `mreview review` invocation per MR,
+  driven by your central CI template. No long-lived daemon, no
+  webhook receiver, no per-repo wiring.
+- **Strictly read-only agent.** The harness agent has access to
+  `read_file` plus the [tokensave](https://tokensave.dev/) MCP server
+  for code-graph queries — nothing else. No shell, no write tools, no
+  re-running CI commands. The contract is enforced by tests in
+  `internal/reviewer/readonly_test.go` and
+  `internal/prompts/review_test.go`.
+- **Language-agnostic.** tokensave handles symbol extraction, blast
+  radius, and semantic search across 50+ languages. mreview never
+  reads source files just to parse them.
+- **Multi-provider.** Six LLM providers wired through
+  [harness](https://github.com/sausheong/harness): Anthropic,
+  OpenAI, Gemini, LiteLLM, OpenRouter, and local Ollama/LM Studio.
+  `--provider=…` selects; the harness library owns the wire format.
+- **CI artifact reuse.** Build, test, lint, and vulncheck are run
+  *before* mreview by separate CI stages. mreview reads their
+  artifacts and injects them into the harness prompt as pre-loaded
+  context — the agent never re-runs them.
+- **Policy-driven.** A `policy.yaml` file controls how findings are
+  severity-escalated, what synthetic rules fire, and what label
+  triggers an MR-wide escalation. Missing / empty / malformed
+  artifacts degrade the review gracefully, never crash it.
 
 ## How it works
 
 ```
-┌──────────────┐  ┌────────────────────┐  ┌──────────────────┐
-│ mreview serve │──│  HTTP /webhook      │──│  Worker pool      │
-│              │  │  verify X-Gitlab-    │  │  (4 goroutines,   │
-│ GitLab       │  │  Token HMAC          │  │  bounded queue)   │
-│ sends MR     │  └────────────────────┘  └────────┬─────────┘
-│ events here  │                                     │
-└──────────────┘                                     │
-                                                    ▼
-                          ┌──────────────────────────────────┐
-                          │  Reviewer.ReviewMR              │
-                          │                                  │
-                          │  1. FetchMR / FetchChanges       │
-                          │  2. ChunkByFile                  │
-                          │  3. Per chunk: BuildReviewPrompt │
-                          │     + LLM Chat                   │
-                          │     + ParseReviewResponse       │
-                          │  4. Consolidate (multi-chunk)    │
-                          │  5. FilterFindings (hallucinated  │
-                          │     paths, empty bodies)         │
-                          │  6. ListDiscussions → fingerprint│
-                          │     dedupe set                   │
-                          │  7. PostSummary + PostDiscussion │
-                          └──────────┬───────────────────────┘
-                                     │
-                                     ▼
-                          ┌──────────────────────────────────┐
-                          │  Local LLM (Ollama / llama.cpp /  │
-                          │  vLLM / LM Studio)                │
-                          │  OpenAI-compatible /v1 endpoint   │
-                          └──────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────┐
+│  Central CI pipeline (one stage per producer + one for mreview)  │
+│                                                                  │
+│   go-build      ──┐                                             │
+│   go-test       ──┤                                             │
+│   golangci-lint  ─┼─→ .mreview-artifacts/                       │
+│   govulncheck   ──┤   build.log                                  │
+│   tokensave sync ┘   test_results.json                          │
+│                     lint.json                                   │
+│                     vulns.json                                   │
+│                                                                  │
+│                                  ┌─────────────────────────┐    │
+│   mreview  ←────────────────────┤  Harness Runtime         │    │
+│   (orchestrator + reviewer)      │                         │    │
+│                                  │  Provider:              │    │
+│   1. Read CI artifacts  ────────► │   Anthropic / OpenAI /  │    │
+│                                  │   Gemini / LiteLLM /    │    │
+│   2. Read policy.yaml ──────────► │   OpenRouter / Local    │    │
+│                                  │                         │    │
+│   3. Fetch MR + diff from  ────► │  Tools:                  │    │
+│      GitLab (gitlab client)      │   read_file              │    │
+│                                  │   mcp__tokensave__*      │    │
+│   4. Build user prompt:          │     smart_context        │    │
+│      MR metadata + diff          │     semantic_search      │    │
+│      chunks + artifact           │     impact_analysis      │    │
+│      block + policy hints        │                         │    │
+│                                  │  Loop:                   │    │
+│   5. Run harness ────────────────► │   think → tool call →   │    │
+│                                  │   think → ... → emit    │    │
+│   6. Apply policy.Enforce()  ◄───│   findings JSON         │    │
+│   7. Dedupe vs existing     ◄────┘                         │    │
+│      GitLab discussions                                         │
+│   8. Post summary + inline  ────► GitLab API                  │
+│      findings                                                  │
+└──────────────────────────────────────────────────────────────────┘
 ```
 
-`mreview review` is the same pipeline but skips the webhook front-end;
-it's the right entrypoint for CI jobs, cron, and `make review-MR123`.
+The orchestrator (`internal/reviewer/orchestrator.go`) is a pure
+Go function — no goroutines, no plugin discovery, no event loop.
+Context cancellation propagates. The harness library owns the LLM
+loop, streaming, prompt caching, MCP connection lifecycle, and
+session persistence; mreview owns the GitLab plumbing, the policy
+enforcer, the artifact loader, and the orchestrator glue.
 
 ## Install
 
@@ -134,32 +161,39 @@ go install github.com/inful/mreview/cmd/mreview@latest
 
 ```bash
 # 1. Verify your wiring before posting anything to GitLab.
-mreview doctor --skip-llm   # GitLab check (needs $GITLAB_TOKEN)
-mreview doctor --skip-gitlab # LLM check (needs running Ollama / etc.)
+mreview doctor --skip-provider   # GitLab check (needs $GITLAB_TOKEN)
+mreview doctor --skip-gitlab     # provider check (needs running Ollama / etc.)
 
-# 2. Dry-run a real review. Logs every LLM call + GitLab post it
-#    WOULD make, without actually posting. Cheap, safe, fast.
+# 2. Dry-run a real review. Logs every harness call + GitLab
+#    post it WOULD make, without actually posting. Cheap, safe, fast.
 GITLAB_TOKEN=glpat-xxx \
 mreview review \
     --repo=group/project \
     --mr=42 \
+    --provider=local \
+    --provider-base-url=http://localhost:11434/v1 \
+    --workdir=$PWD \
     --dry-run \
     --log-format=json
 
 # 3. Same command, no --dry-run. Comments land on the MR.
 GITLAB_TOKEN=glpat-xxx \
-mreview review --repo=group/project --mr=42
+mreview review --repo=group/project --mr=42 \
+    --provider=local \
+    --provider-base-url=http://localhost:11434/v1 \
+    --workdir=$PWD
 
-# 4. Long-running webhook consumer.
-GITLAB_TOKEN=glpat-xxx \
-GITLAB_WEBHOOK_SECRET=mysecret \
-mreview serve --addr=:8080
+# 4. CI invocation (the canonical mode). Drop the reference
+#    central CI template into your org's CI library repo; the
+#    mreview job runs on MR open / reopen / push.
+#    See examples/central-ci.yml for the full producer + mreview
+#    pipeline layout.
 
 # 5. Or persist the connection settings in a config file so
 #    every invocation doesn't repeat them.
 mkdir -p ~/.config/mreview
 cp examples/config.yaml ~/.config/mreview/config.yaml
-$EDITOR ~/.config/mreview/config.yaml    # set gitlab.url + llm.base_url
+$EDITOR ~/.config/mreview/config.yaml    # set gitlab.url + provider.base_url
 GITLAB_TOKEN=glpat-xxx \
 mreview review --repo=group/project --mr=42   # flags win over config
 ```
@@ -178,81 +212,56 @@ Flags:
       --mr=INT                                   (required) Merge request IID.
       --gitlab-url="https://gitlab.com"           GitLab base URL ($GITLAB_URL).
       --gitlab-token=STRING                      (required) Personal Access Token ($GITLAB_TOKEN).
-      --llm-url="http://localhost:11434/v1"        LLM OpenAI-compatible base URL ($LLM_URL).
-      --llm-api-key=STRING                        LLM API key ($LLM_API_KEY).
-      --model="qwen2.5-coder:7b"                  LLM model name ($LLM_MODEL).
-      --temperature=0.2                           LLM sampling temperature.
-      --max-tokens=2048                           LLM max output tokens per call.
-      --reasoning-effort=STRING                    Reasoning budget for o-series-style models:
-                                                  'low' / 'medium' / 'high'. Empty = server default.
-                                                  No-op for models that don't support the field.
-      --max-diff-bytes=200000                     Per-chunk byte budget.
-      --max-batch-bytes=INT                       Byte budget for packing multiple chunks into one
-                                                  LLM call. 0 (default) = one chunk per call.
-      --per-chunk-timeout=2m0s                    Per-LLM-call timeout.
-      --chunk-retries=1                           Chunk-level retry budget for transient errors
-                                                   (timeouts). Default 1 (one retry, two total
-                                                   attempts per chunk).
-      --allow-partial                             On chunk failure, log a warn and continue with
-                                                   empty findings instead of aborting the whole
-                                                   review (atomic failure is the default).
-      --bot-username=STRING                       Bot username for dedupe ($GITLAB_BOT_USERNAME).
-      --retries=3                                 GitLab API retry attempts on transient errors.
-      --retry-backoff=500ms                       Initial retry backoff; exponential with jitter.
-      --on-drafts=skip                            Action on draft MRs (CI_MERGE_REQUEST_DRAFT=true):
-                                                    run the review or skip with exit 0. Default skip.
-      --on-push=skip                              Action on direct branch pushes
-                                                    (CI_PIPELINE_SOURCE=push): run the review or
-                                                    skip with exit 0. Default skip.
-      --policy-file=STRING                        Path to a YAML policy file (severity_overrides,
-                                                    forbid, require, labels). Empty = no policy.
-                                                    See "Policy enforcement" below for the schema.
-      --dry-run                                   Log intended LLM and GitLab calls without performing them.
+      --provider=STRING                          LLM provider (anthropic / openai / gemini /
+                                                   litellm / openrouter / local). Default "local".
+      --provider-base-url=STRING                 Provider base URL (required for litellm / local;
+                                                   ignored for hosted providers).
+      --model=STRING                             Model name (provider-specific).
+      --workdir=STRING                           Working directory the harness runs against
+                                                   (defaults to the repo root).
+      --tokensave-enabled=true                   Enable the tokensave MCP server (the agent's
+                                                   primary code-graph tool). Default true.
+      --tokensave-bin=STRING                     Path to the tokensave binary (default: PATH-resolved
+                                                   'tokensave'). Used when --tokensave-enabled=true.
+      --artifacts-dir=STRING                     Directory containing CI artifacts (build.log,
+                                                   test_results.json, lint.json, vulns.json).
+                                                   Default .mreview-artifacts.
+      --policy-file=STRING                       Path to a YAML policy file (severity_overrides,
+                                                   forbid, require, labels). Empty = no policy.
+                                                   See "Policy enforcement" below for the schema.
+      --on-drafts=skip                           Action on draft MRs (CI_MERGE_REQUEST_DRAFT=true):
+                                                   run the review or skip with exit 0. Default skip.
+      --on-push=skip                             Action on direct branch pushes
+                                                   (CI_PIPELINE_SOURCE=push): run the review or
+                                                   skip with exit 0. Default skip.
+      --bot-username=STRING                      Bot username for dedupe ($GITLAB_BOT_USERNAME).
+      --retries=3                                GitLab API retry attempts on transient errors.
+      --retry-backoff=500ms                      Initial retry backoff; exponential with jitter.
+      --dry-run                                  Log intended GitLab posts without performing them.
+      --log-format=text                          Log output format (text | json).
+      --verbose                                  Enable debug logging.
+      --config=STRING                            Path to YAML config file (default ~/.config/mreview/config.yaml).
 ```
 
-The GitLab token must have `api` scope. The LLM URL must be an
-OpenAI-compatible `/v1` endpoint (the provider appends `/v1` automatically
-when missing — covers Ollama without forcing the user to type it).
-
-### `mreview serve`
-
-Run a webhook server that consumes GitLab `merge_request` events.
-
-```text
-Usage: mreview serve [flags]
-
-Flags:
-      --addr=":8080"                              HTTP listen address.
-      --webhook-secret=STRING                     GitLab webhook shared secret ($GITLAB_WEBHOOK_SECRET).
-      --queue-size=32                             Burst buffer for webhook deliveries that arrive while the pool is busy.
-      --workers=4                                 Maximum concurrent review goroutines (steady-state cap; distinct from --queue-size).
-      --shutdown-timeout=30s                      Graceful shutdown drain timeout.
-      --gitlab-url=...                            (same as review)
-      --gitlab-token=STRING                       (required, $GITLAB_TOKEN)
-      --llm-url=..., --llm-api-key=STRING, --model=STRING, ...
-                                                  (same as review)
-```
-
-`serve` registers `POST /webhook` (the GitLab webhook target) and
-`GET /healthz` (queue depth + capacity in JSON). It exits 0 when
-shutdown completes cleanly.
+The GitLab token must have `api` scope. The provider's API key is
+read from the provider-specific env var (e.g. `ANTHROPIC_API_KEY`,
+`OPENAI_API_KEY`); the harness library handles the convention.
 
 ### `mreview doctor`
 
-Validate config + LLM + GitLab connectivity. Useful in CI / pre-deploy.
+Validate config + provider + GitLab connectivity. Useful in CI / pre-deploy.
 
 ```text
 Usage: mreview doctor [flags]
 
 Flags:
-      --gitlab-url=...                            (same as review)
-      --gitlab-token=STRING                       ($GITLAB_TOKEN)
-      --llm-url=..., --llm-api-key=STRING, --model=STRING, ...
-                                                 (same as review)
-      --max-diff-bytes=200000                     (matches review)
-      --per-chunk-timeout=2m0s                    (matches review)
-      --skip-gitlab                               Skip the GitLab check.
-      --skip-llm                                  Skip the LLM check.
+      --gitlab-url=...                           (same as review)
+      --gitlab-token=STRING                      ($GITLAB_TOKEN)
+      --provider=STRING                          (same as review)
+      --provider-base-url=STRING                 (same as review)
+      --model=STRING                             (same as review)
+      --skip-gitlab                              Skip the GitLab check.
+      --skip-provider                            Skip the provider check.
 ```
 
 Example output:
@@ -261,21 +270,28 @@ Example output:
 mreview doctor
 ─────────────
 GitLab: ok  alice
-  URL: https://gitlab.example.com
+  URL: https://gitlab.com
   Name: Alice Example
 
-LLM: ok  qwen2.5-coder:7b available (of 3)
-  URL: http://localhost:11434/v1
-  Model present
+Provider: ok  local ready (model=qwen2.5-coder:7b, 3 known models)
   Models: qwen2.5-coder:7b, llama3:8b, mistral:7b
 
-Config: ok  --max-diff-bytes=200000  --per-chunk-timeout=2m0s  model=qwen2.5-coder:7b
+Config: ok  provider=local model=qwen2.5-coder:7b
 
 All checks passed.
 ```
 
-On failure (e.g. wrong token, unreachable LLM) the subcommand exits 1
-with a per-check breakdown.
+On failure (e.g. wrong token, unreachable provider) the subcommand
+exits 1 with a per-check breakdown.
+
+### `mreview serve` — removed
+
+The `mreview serve` webhook-receiver mode was dropped in the
+architecture reset ([#42](https://github.com/inful/mreview/issues/42)).
+CI is the canonical run mode; central CI definitions handle
+onboarding (see [Onboarding via central CI](#onboarding-via-central-ci)
+below). Operator-facing migration notes are in [issue #42's
+comment thread](https://github.com/inful/mreview/issues/42).
 
 ## Behaviour by event
 
@@ -468,43 +484,76 @@ hit a real MR.
 |------|--------------------------------------------------|
 | `0`  | Success                                          |
 | `2`  | Configuration error (missing flag, bad flag, missing config, malformed policy file) |
-| `3`  | Authentication error (GitLab or LLM rejected)    |
-| `4`  | Not found (MR, project, model)                   |
+| `3`  | Authentication error (GitLab rejected the token) |
+| `4`  | Not found (MR, project)                          |
 | `5`  | Conflict (line anchor out of range, stale MR head) |
 | `6`  | Transient failure exhausted (5xx / 429 retries)  |
-| `7`  | Unexpected internal error, or atomic chunk failure (see issue #31) |
+| `7`  | Unexpected internal error                        |
 | `8`  | Policy violation — at least one `error`-verdict finding (or any `forbid` / `require` rule fired) per `policy.yaml`. Distinct from `7` so CI scripts can tell "policy said no" apart from "review crashed." |
 
-CI scripts can branch on these. `mreview review` and `mreview serve`
-follow the same table; `mreview doctor` uses 0 / 1 (it always runs to
-completion so it can report failures).
+CI scripts can branch on these. `mreview review` follows the table
+above; `mreview doctor` uses 0 / 1 (it always runs to completion
+so it can report failures).
 
-## GitLab webhook setup (for `serve`)
+## Read-only tool surface
 
-1. Generate a webhook secret (any random string; e.g. `openssl rand -hex 32`).
-   Pass it to `mreview serve` as `--webhook-secret` or
-   `GITLAB_WEBHOOK_SECRET`.
-2. In your GitLab project: **Settings → Webhooks**.
-3. **URL**: `http://<your-host>:8080/webhook` (or whatever `--addr` you
-   picked).
-4. **Secret token**: the same secret as in step 1.
-5. **Trigger**: ✅ Merge request events. Leave others off so mreview only
-   fires on the events it cares about.
-6. **SSL verification**: enable when the URL is HTTPS; disable only for
-   local development.
-7. Save.
+The harness agent has **exactly** these tools registered:
 
-Test the webhook in the GitLab UI ("Test → Push events") to confirm the
-URL is reachable. Push events return HTTP 204 (mreview ignores non-MR
-events but acknowledges the delivery).
+| Tool | Purpose |
+|------|---------|
+| `read_file` | Read raw source / config files |
+| `mcp__tokensave__smart_context` | Code-graph queries ("what does this code do / what depends on it") |
+| `mcp__tokensave__semantic_search` | Semantic search across the repo |
+| `mcp__tokensave__impact_analysis` | Blast radius ("if I change this, what breaks") |
+
+The agent does **not** have:
+
+- shell / bash
+- write_file / edit_file
+- any tool that mutates the working directory
+
+This is the read-only contract enforced by tests in
+`internal/reviewer/readonly_test.go` and
+`internal/prompts/review_test.go`. The harness library's bash /
+edit_file / write_file tools are imported only by tests that
+prove they aren't registered; mreview never references them
+in production code.
+
+## CI artifact reuse
+
+The central CI pipeline runs build / test / lint / vulncheck
+**before** mreview, then writes their output to
+`.mreview-artifacts/`:
+
+| Artifact | Source |
+|----------|--------|
+| `build.log` | `go build ./...` (tail of the log + build-error detection) |
+| `test_results.json` | `go test -json -race -count=1 ./...` (NDJSON) |
+| `lint.json` | `golangci-lint run --out-format=json ./...` (JSON array) |
+| `vulns.json` | `govulncheck ./...` (JSON) |
+
+mreview reads these at startup (via `--artifacts-dir`,
+default `.mreview-artifacts`) and injects them into the
+harness prompt as pre-loaded context. The agent never
+re-runs the producer tools — it has no shell access.
+
+**Robustness contract:** missing / empty / malformed
+artifacts cause **degraded information**, not errors. The
+prompt explicitly tells the agent which artifacts are
+`NOT AVAILABLE` so it can self-calibrate confidence. The
+review always runs; the artifact availability only changes
+how much corroboration the agent has.
+
+See [`examples/central-ci.yml`](examples/central-ci.yml) for
+the full producer + mreview pipeline layout.
 
 ## Configuration
 
 Three layers, in priority order (CLI flags always win):
 
 1. **CLI flags** — e.g. `--gitlab-url=https://example.com`
-2. **Environment variables** — `GITLAB_URL`, `LLM_MODEL`, etc. (every
-   flag has a matching `env:` tag; see `--help` for each subcommand)
+2. **Environment variables** — `GITLAB_URL`, `MREVIEW_PROVIDER_BASE_URL`, etc.
+   (every flag has a matching `env:` tag; see `--help` for each subcommand)
 3. **YAML config file** at `--config` / `$MREVIEW_CONFIG` /
    `~/.config/mreview/config.yaml`. Values from the config populate
    env vars BEFORE flag parsing, so any flag the user doesn't set
@@ -519,81 +568,59 @@ store the secret itself in the file.
 gitlab:
   url: https://gitlab.example.com
   token_env: GITLAB_TOKEN              # the token lives here, in the env
-llm:
+provider:
   base_url: http://localhost:11434/v1
   model: qwen2.5-coder:7b
-review:
-  max_diff_bytes: 200000
-  temperature: 0.2
-server:
-  addr: ":8080"
-  webhook_secret_env: GITLAB_WEBHOOK_SECRET
-  queue_size: 32
 ```
 
-### LLM presets
+### LLM presets — deprecated
 
-When you run mreview against multiple LLM backends with different
-context windows, declaring each model's `context_window` once lets
-mreview auto-derive the right packing budget per invocation. The
-operator writes the YAML once; the `--model` flag selects the preset.
+The `llm_presets` / `llm_preset_by_model` YAML block was the
+hand-rolled LLM-loop's mechanism for deriving packing budgets.
+After the architecture reset ([#42](https://github.com/inful/mreview/issues/42)),
+[harness](https://github.com/sausheong/harness) owns prompt-cache
+discipline and the provider matrix. The preset layer is kept as a
+stub so existing YAML configs keep parsing, but it's no longer
+used to size the work. The harness library's own preset layer
+will replace it.
 
-```yaml
-llm_presets:
-  opus-local:
-    context_window: 168000
-    per_chunk_timeout: 15m
-  gemma-26b-e4b:
-    context_window: 80000
-    per_chunk_timeout: 5m
-  o-series:
-    context_window: 200000
-    per_chunk_timeout: 15m
-    reasoning_effort: high
-  coding-agent:
-    # Model's effective context is smaller than advertised; the
-    # max_batch_bytes override pins batch size to a value the model
-    # can process within per_chunk_timeout. Tune by trying
-    # --max-batch-bytes=N at the CLI and seeing what completes.
-    context_window: 168000
-    per_chunk_timeout: 5m
-    max_batch_bytes: 3000
+## Onboarding via central CI
 
-llm_preset_by_model:
-  "qwen2.5-coder:7b": opus-local
-  "gemma-26b-e4b":    gemma-26b-e4b
-  "o3-mini":          o-series
-  "coding-agent":     coding-agent
-```
+The architecture reset ([#42](https://github.com/inful/mreview/issues/42))
+moves mreview from a per-repo webhook receiver to a per-MR CI
+invocation. The onboarding pattern is:
 
-When `--model=qwen2.5-coder:7b` matches, mreview derives
-`--max-batch-bytes ≈ 520 KB` from the 168k window and uses the
-15-minute timeout — no per-invocation flag wrangling. Lookup is
-strict (exact match); unknown models get no preset and packing
-falls back to disabled (one LLM call per file).
+1. **Pick a central location** for reusable CI workflows. Most
+   orgs use a `ci-templates` or `.gitlab-ci.yml` library repo.
+2. **Drop in the reference template.** The full pattern lives
+   in [`examples/central-ci.yml`](examples/central-ci.yml) — copy
+   it verbatim and adjust the image / artifact paths.
+3. **Per-project wiring** is one line in the consumer repo's
+   `.gitlab-ci.yml`:
 
-The byte budget is derived as:
+   ```yaml
+   include:
+     - project: 'your-org/ci-templates'
+       ref: main
+       file: 'mreview.yml'
+   ```
 
-```
-max_batch_bytes = (context_window - 1500 - max_tokens - 15% safety) × 4 bytes/token
-```
+4. **No per-project config** beyond the GitLab token. The
+   reusable workflow carries the producer stages, the
+   tokensave-sync stage, and the mreview stage. Artifacts flow
+   between stages automatically.
+5. **Operator overrides** go in the consumer repo's
+   `.gitlab-ci.yml` — e.g. `MREVIEW_PROVIDER_BASE_URL` if the
+   org's LLM proxy lives at a non-default URL.
 
-CLI flags (`--max-batch-bytes`, `--per-chunk-timeout`,
-`--reasoning-effort`) always win when set; the preset fills in the
-gaps. When a preset applies, you'll see log lines like:
+This pattern is what "the central CI definition handles
+onboarding" means in the locked decisions table. mreview
+ships `examples/central-ci.yml` as the *reference template*;
+the actual central workflow lives wherever the org keeps it.
 
-```
-INFO LLM preset applied                 preset=opus-local model=qwen2.5-coder:7b context_window=168000
-INFO max_batch_bytes derived from preset preset=opus-local context_window=168000 max_tokens=8192 max_batch_bytes=532432
-INFO max_batch_bytes from preset         preset=coding-agent max_batch_bytes=3000 derived_value=532432
-INFO reasoning_effort from preset        preset=o-series reasoning_effort=high
-```
-
-Three sources of `max_batch_bytes`, in priority order:
-
-1. **CLI flag** `--max-batch-bytes=N` (one-off override)
-2. **Preset field** `max_batch_bytes: N` (per-model tuning)
-3. **Derived from `context_window`** (sensible default)
+For teams that don't have a central CI repo yet, the reference
+template can be inlined into each repo's `.gitlab-ci.yml` — it
+works standalone.
 
 Use the preset field when the model's effective context is smaller than its advertised window — common for heavily quantized local models that return empty content (rather than timing out) on prompts technically within the byte budget.
 
@@ -606,118 +633,168 @@ non-supporting providers ignore the field on the wire.
 
 ## Customizing the prompts
 
-The system prompt that goes to the LLM is **layered**:
+The system prompt lives in
+[`internal/prompts/review_system.md`](internal/prompts/review_system.md)
+and is embedded into the binary at build time via `//go:embed`.
+Golden-file tests in
+[`internal/prompts/review_test.go`](internal/prompts/review_test.go)
+pin the contract (read-only tool surface, JSON schema, severity
+levels, categories, CI artifact references, policy awareness).
+Changes go through PR review.
 
-1. **System-owned prefix** (immutable) — JSON output schema, severity
-   semantics, the "be terse, output directly, don't wrap in fences"
-   rules. Operators cannot override this. If they try (by, say,
-   asking for a different output format), the parser still expects
-   the standard ReviewResponse schema and parsing succeeds.
+The user prompt is built dynamically by
+`prompts.ReviewUserPrompt(meta, chunks, artifactSet)` from the
+MR metadata, the diff chunks, and the loaded CI artifact set.
+The function is pure — no I/O, no logging — so it can be
+unit-tested with fixture inputs.
 
-2. **Operator-supplied suffix** (optional) — appended after the
-   system-owned rules. Use this for team conventions, language
-   preferences, documentation standards, severity semantics your
-   team uses, etc. Sits inside a labeled
-   `# Team-specific guidance (operator-supplied)` section so the
-   LLM can tell where it begins.
+What the agent sees in the user prompt:
 
-Similarly, the user prompt is layered:
+1. MR metadata (IID, title, author, source → target branch).
+2. MR description (when present).
+3. CI artifact block (build / test / lint / vulns status +
+   content; explicit `NOT AVAILABLE` markers for missing files).
+4. The diff itself, in labelled chunks:
+   ```
+   === File: internal/foo.go ===
+   diff --git a/internal/foo.go b/internal/foo.go
+   ...
+   === End File: internal/foo.go ===
+   ```
+5. The closing instruction: "emit the JSON object described in
+   your instructions."
 
-1. **System-owned** — MR header (IID, title, author, branches),
-   description (when `IncludeDescription` is on), per-file chunks
-   with the `=== File: ... ===` envelope.
-2. **Operator-supplied suffix** (optional) — appended after the
-   chunks. Use this for per-MR context: "this MR is a WIP",
-   "this is a dependency bump", "this touches a hot path".
+**Policy-driven suffix.** The orchestrator threads the
+loaded `policy.yaml` into the orchestrator's `applyPolicy` call
+on the agent's findings — the prompt itself doesn't include
+the policy (the harness library handles policy enforcement
+transparently; the verdict is attached to findings before the
+GitLab post).
 
-Provide the two via flags (or matching env vars):
+**What you CAN'T do with the prompt:** redefine the JSON
+schema, change the severity values, ask for non-JSON output,
+or rename the response fields. Doing any of those would break
+the parser. The system prompt's contract is locked in by tests.
 
-```bash
-mreview review \
-    --repo=group/project --mr=42 \
-    --system-prompt-file=/etc/mreview/team-rules.md \
-    --user-prompt-file=/etc/mreview/current-mr-context.md
-```
-
-See [`examples/team-prompt-system.txt`](examples/team-prompt-system.txt)
-and [`examples/team-prompt-user.txt`](examples/team-prompt-user.txt)
-for worked examples. The defaults (no flag) are the system-owned
-prompts unchanged — your text is purely additive.
-
-**What you CAN'T do with these files:** redefine the JSON schema,
-change the severity values, ask for non-JSON output, or rename the
-response fields. Doing any of those would break the parser. Use the
-suffix only for guidance — keep the schema as is.
+## Flag reference
 
 | Flag                          | Env var                       | Default                          |
 |-------------------------------|-------------------------------|----------------------------------|
 | `--gitlab-url`                | `GITLAB_URL`                  | `https://gitlab.com`             |
 | `--gitlab-token`              | `GITLAB_TOKEN`                | (required)                       |
-| `--llm-url`                   | `LLM_URL`                     | `http://localhost:11434/v1`      |
-| `--llm-api-key`               | `LLM_API_KEY`                 | empty (Ollama ignores)           |
-| `--llm-model`                 | `LLM_MODEL`                   | `qwen2.5-coder:7b`               |
+| `--provider`                  | `MREVIEW_PROVIDER`            | `local`                          |
+| `--provider-base-url`         | `MREVIEW_PROVIDER_BASE_URL`   | empty                            |
+| `--model`                     | `MREVIEW_MODEL`               | `qwen2.5-coder:7b`               |
+| `--workdir`                   | `MREVIEW_WORKDIR`             | empty (defaults to repo root)     |
+| `--tokensave-enabled`         | `MREVIEW_TOKENSAVE_ENABLED`   | `true`                           |
+| `--tokensave-bin`             | `MREVIEW_TOKENSAVE_BIN`       | `tokensave`                      |
+| `--artifacts-dir`             | `MREVIEW_ARTIFACTS_DIR`       | `.mreview-artifacts`             |
+| `--policy-file`               | `MREVIEW_POLICY_FILE`         | empty (no policy)                |
+| `--on-drafts`                 | `MREVIEW_ON_DRAFTS`           | `skip`                           |
+| `--on-push`                   | `MREVIEW_ON_PUSH`             | `skip`                           |
 | `--bot-username`              | `GITLAB_BOT_USERNAME`         | empty (all comments count)       |
-| `--webhook-secret` (serve)    | `GITLAB_WEBHOOK_SECRET`       | (required)                       |
-| `--max-diff-bytes`            | `MREVIEW_MAX_DIFF_BYTES`      | `200000`                         |
-| `--temperature`               | `MREVIEW_TEMPERATURE`         | `0.2`                            |
-| `--max-tokens`                | `MREVIEW_MAX_TOKENS`          | `2048`                           |
-| `--per-chunk-timeout`         | `MREVIEW_PER_CHUNK_TIMEOUT`   | `120s`                           |
-| `--chunk-retries`             | `MREVIEW_CHUNK_RETRIES`       | `1`                              |
-| `--allow-partial`             | `MREVIEW_ALLOW_PARTIAL`       | (unset)                          |
-| `--queue-size` (serve)        | `MREVIEW_QUEUE_SIZE`          | `32`                             |
-| `--workers` (serve)           | `MREVIEW_WORKERS`             | `4`                              |
-| `--addr` (serve)              | `MREVIEW_ADDR`                | `:8080`                          |
-| `--shutdown-timeout` (serve)  | `MREVIEW_SHUTDOWN_TIMEOUT`    | `30s`                            |
-| `--retries`                   | `MREVIEW_RETRIES`            | `3`                              |
+| `--retries`                   | `MREVIEW_RETRIES`             | `3`                              |
 | `--retry-backoff`             | `MREVIEW_RETRY_BACKOFF`       | `500ms`                          |
-| `--config` (global)           | `MREVIEW_CONFIG`              | `~/.config/mreview/config.yaml`  |
+| `--dry-run`                   | (no env)                      | `false`                          |
+| `--log-format`                | (no env)                      | `text`                           |
+| `--verbose`                   | (no env)                      | `false`                          |
+| `--config`                    | `MREVIEW_CONFIG`              | `~/.config/mreview/config.yaml`  |
 
 ## Architecture
 
 ```
-┌──────────────┐  ┌────────────────────┐  ┌──────────────────┐
-│ mreview serve │──│  HTTP /webhook      │──│  Worker pool      │
-│              │  │  verify X-Gitlab-    │  │  (4 goroutines,   │
-│ GitLab       │  │  Token HMAC          │  │  bounded queue)   │
-│ sends MR     │  └────────────────────┘  └────────┬─────────┘
-│ events here  │                                     │
-└──────────────┘                                     │
-                                                    ▼
-                          ┌──────────────────────────────────┐
-                          │  Reviewer.ReviewMR              │
-                          │  fetch → chunk → LLM → dedupe →  │
-                          │  post                            │
-                          └──────────┬───────────────────────┘
-                                     │
-                                     ▼
-                          ┌──────────────────────────────────┐
-                          │  Local LLM (Ollama / llama.cpp /  │
-                          │  vLLM / LM Studio)                │
-                          └──────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────┐
+│  Central CI pipeline (one stage per producer + one for mreview)  │
+│                                                                  │
+│   go-build      ──┐                                             │
+│   go-test       ──┤                                             │
+│   golangci-lint  ─┼─→ .mreview-artifacts/                       │
+│   govulncheck   ──┤   build.log                                  │
+│   tokensave sync ┘   test_results.json                          │
+│                     lint.json                                   │
+│                     vulns.json                                   │
+│                                                                  │
+│                                  ┌─────────────────────────┐    │
+│   mreview  ←────────────────────┤  Harness Runtime         │    │
+│   (orchestrator + reviewer)      │                         │    │
+│                                  │  Provider:              │    │
+│   1. Read CI artifacts  ────────► │   Anthropic / OpenAI /  │    │
+│                                  │   Gemini / LiteLLM /    │    │
+│   2. Read policy.yaml ──────────► │   OpenRouter / Local    │    │
+│                                  │                         │    │
+│   3. Fetch MR + diff from  ────► │  Tools:                  │    │
+│      GitLab (gitlab client)      │   read_file              │    │
+│                                  │   mcp__tokensave__*      │    │
+│   4. Build user prompt:          │     smart_context        │    │
+│      MR metadata + diff          │     semantic_search      │    │
+│      chunks + artifact           │     impact_analysis      │    │
+│      block + policy hints        │                         │    │
+│                                  │  Loop:                   │    │
+│   5. Run harness ────────────────► │   think → tool call →   │    │
+│                                  │   think → ... → emit    │    │
+│   6. Apply policy.Enforce()  ◄───│   findings JSON         │    │
+│   7. Dedupe vs existing     ◄────┘                         │    │
+│      GitLab discussions                                         │
+│   8. Post summary + inline  ────► GitLab API                  │
+│      findings                                                  │
+└──────────────────────────────────────────────────────────────────┘
 ```
 
-`mreview review` is the same pipeline but skips the webhook front-end;
-it's the right entrypoint for CI jobs, cron, and `make review-MR123`.
+`mreview review` is the only entrypoint. The orchestrator is a
+pure Go function — no goroutines, no plugin discovery, no event
+loop. Context cancellation propagates. The harness library
+owns the LLM loop, streaming, prompt caching, MCP connection
+lifecycle, and session persistence; mreview owns the GitLab
+plumbing, the policy enforcer, the artifact loader, and the
+orchestrator glue.
 
 ### Package layout
 
 ```
 cmd/mreview/             CLI wiring (kong), exit codes, slog setup,
-                          subcommand dispatch
-internal/gitlab/          Typed wrapper around client-go:
-                          FetchMR, FetchChanges, PostSummary,
-                          PostDiscussion, ListDiscussions, CurrentUser
-                          + retry/backoff/typed errors
-internal/llm/             OpenAI-compatible Provider + resilient
-                          JSON parser + per-file chunker + prompt
-                          templates
-internal/reviewer/        Orchestrator: fetch → chunk → LLM → parse →
-                          dedupe → post. End-to-end ReviewMR.
-internal/server/          Webhook HTTP receiver + bounded worker pool,
-                          constant-time token verify, graceful shutdown
+                          subcommand dispatch. The review subcommand
+                          wires the orchestrator + harness runtime.
+internal/event/          Per-event guard (issue #41):
+                          event.Decide() + the Source/Prefer types.
+                          Pure functions, table-driven tests over
+                          every CI source.
+internal/policy/         policy.yaml enforcement (issue #42 step 2):
+                          severity_overrides / forbid / require /
+                          labels. Strict validation + Enforce().
+internal/diff/           Diff chunker (preserved from the old
+                          internal/llm/). Language-agnostic; takes a
+                          tiny Source interface so ChangeFile
+                          satisfies it via a small adapter.
+internal/ci/artifact/     CI artifact loaders (issue #43):
+                          build.log / test_results.json / lint.json /
+                          vulns.json. Per-artifact failures live in
+                          LoadResult (NOT errors); LoadAll itself
+                          errors only when the directory is missing.
+internal/prompts/        Review prompts — system (//go:embed in
+                          review_system.md) + user (pure renderer).
+                          Artifact block rendering lives here too.
+internal/tokensave/      tokensave MCP server config — wired into
+                          AgentSpec.MCPServers.
+internal/provider/       Six-provider switch (anthropic / openai /
+                          gemini / litellm / openrouter / local).
+                          Harness library does the wire work.
+internal/gitlab/          Typed wrapper around client-go: FetchMR,
+                          FetchChanges, PostSummary, PostDiscussion,
+                          ListDiscussions, CurrentUser + retry /
+                          backoff / typed errors.
+internal/reviewer/        Orchestrator: fetch → chunk → harness →
+                          parse → dedupe → post. Runner interface
+                          (HarnessRunner in production, FakeRunner
+                          in tests).
 internal/logging/         slog JSON/text setup
 internal/config/          YAML config loader (--config file flag)
-examples/                 Sample config + docker-compose + gitlab-ci
+internal/strutil/         Tiny string-trim helper shared across
+                          packages.
+
+examples/                 config.yaml + docker-compose.yml +
+                          gitlab-ci.yml (single-repo pattern) +
+                          policy.yaml + central-ci.yml (org-wide
+                          pattern).
 Dockerfile{,debug}        distroless static, multi-arch via goreleaser
 .goreleaser.yaml          Builds, archives, signs, docker images
 .github/workflows/        ci (lint + test on every push) + release (tag)
@@ -812,23 +889,21 @@ across 50 files is roughly 10× the token budget.
 | Stage | Typical time |
 |---|---|
 | GitLab API calls (3 calls per review: fetch MR, fetch changes, list discussions) | < 1 s total |
-| Per-chunk LLM call (7B model on decent GPU/CPU) | 5 – 30 s |
-| Per-chunk LLM call (CPU-only Ollama, 7B Q4) | 30 – 120 s |
-| Merge verdict call | Same as per-chunk |
+| Harness agent loop (one invocation per MR — the harness manages its own internal turns) | 5 – 60 s |
+| Harness agent loop (CPU-only Ollama, 7B Q4) | 30 – 300 s |
 | Posting comments (1 summary + N inline findings) | < 1 s total |
 
 For a typical 5-file MR on GPU-accelerated Ollama, end-to-end
 review time is **30 – 90 seconds**. On a CPU-only Raspberry Pi 5
-with a 7B model, expect **5 – 15 minutes** — the bot will hit
-its per-chunk timeout (default 120 s) on slow chunks. Bump
-`--per-chunk-timeout` (or `--max-diff-bytes` to keep prompts
-smaller) for slow setups.
+with a 7B model, expect **5 – 15 minutes**.
 
 ### Memory
 
-**mreview binary:** ~20 MB static, ~50 MB RSS at idle. Concurrent
-reviews each consume ~10 MB transient (mostly the diff in memory
-during chunking).
+**mreview binary:** ~30 MB static, ~80 MB RSS at runtime (the
+harness library brings in streaming + session + MCP
+dependencies). A review consumes ~20 MB transient (mostly the
+diff in memory during chunking + the rendered prompt in
+memory while the harness runs).
 
 **LLM server (Ollama example):**
 
@@ -839,13 +914,13 @@ during chunking).
 | 70B Q4 | ~40 GB |
 
 KV cache grows with context length — a 32 k context window adds
-1–4 GB on top of the model weights. For long-MR chunked reviews
-this matters: if your LLM OOMs on a chunk, raise `--max-diff-bytes`
-(or `--max-tokens`) to keep prompts shorter.
+1–4 GB on top of the model weights. The harness library
+respects the model's `ContextWindow` from `AgentSpec`; pass
+`--max-tokens` to bound output.
 
 ### GitLab API rate limits
 
-`mreview review` makes 3–5 GitLab API calls per run:
+`mreview review` makes 3 + N GitLab API calls per run:
 
 - `GET /merge_requests/:iid` (1)
 - `GET /merge_requests/:iid/changes` (1)
@@ -854,9 +929,8 @@ this matters: if your LLM OOMs on a chunk, raise `--max-diff-bytes`
 - `POST /merge_requests/:iid/discussions` (1 per inline finding)
 
 GitLab.com's per-user rate limit is generous for `api`-scoped
-PATs (2 000 requests/hour). `mreview serve` running on a busy
-instance (say, 50 MRs/hour) consumes ~250 requests/hour — well
-under the cap. Self-hosted GitLab has no enforced rate limit.
+PATs (2 000 requests/hour). A typical mreview run consumes
+~10 requests. Self-hosted GitLab has no enforced rate limit.
 
 `mreview` does its own retry on transient 5xx / 429 via
 `internal/gitlab/retry.go`. The `Retry-After` HTTP header is
@@ -867,11 +941,9 @@ honored up to a 60-second cap (longer values get clipped).
 | Symptom | Fix |
 |---|---|
 | Reviews take minutes per MR | Smaller model (7B → 3B); faster hardware; lower `--max-diff-bytes` |
-| Frequent "queue full" 503s on `serve` | Raise `--queue-size`; scale up `mreview serve` replicas (each is stateless — they don't share dedupe state today, which is a known limitation, see [Issue: shared dedupe store](#) for the future fix) |
-| LLM is shared with other tenants and concurrency is too high | Lower `--workers` (e.g. `--workers=1` for a single-Ollama-on-a-Pi, `--workers=2` for shared CPUs) |
-| LLM has request batching and concurrency is too low | Raise `--workers` (e.g. `--workers=8` for vLLM with continuous batching on multi-core) |
-| Bot posts near-duplicate findings across pushes | Switch dedupe to `(file, line, body)` (deferred) |
-| LLM OOMs on a chunk | Lower `--max-diff-bytes`; use a smaller context window |
+| Harness agent loops too long | Lower `MaxTurns` in the AgentSpec (currently 10); shorten the system prompt |
+| Bot posts near-duplicate findings across pushes | Dedupe is already on `(file, line, body)`; tune the bot-username filter (`--bot-username`) |
+| LLM OOMs on a chunk | Lower `--max-tokens`; use a smaller context window |
 
 ## Development
 
@@ -975,23 +1047,26 @@ Solutions:
 
 ## Examples
 
-The `examples/` directory ships with copy-pasteable starting points.
-Most operators only need one or two.
+The `examples/` directory ships with copy-pasteable starting
+points. Most operators only need one or two.
 
 | File | When you'd use it |
 |---|---|
 | [`config.yaml`](examples/config.yaml) | Persist flags + env across invocations — every secret references an env-var NAME (never a value). Drop at `~/.config/mreview/config.yaml` or pass with `--config`. |
 | [`docker-compose.yml`](examples/docker-compose.yml) | Local dev or single-host production: brings up Ollama + mreview with health checks and a named volume for the model. |
-| [`gitlab-ci.yml`](examples/gitlab-ci.yml) | CI-driven review instead of a long-running `serve` — runs on every MR pipeline. Best for teams that already pay for CI minutes and prefer ephemeral review jobs. |
-| [`webhook-setup.md`](examples/webhook-setup.md) | Walkthrough of the GitLab UI to install the webhook for one project, with secret-rotation + HTTPS security notes. |
-| [`team-prompt-system.txt`](examples/team-prompt-system.txt) | Operator-supplied text appended to **every** system prompt — documentation standards, dependency preferences, severity semantics. Always-loaded team conventions. |
-| [`team-prompt-user.txt`](examples/team-prompt-user.txt) | Operator-supplied text appended to **every** user prompt — per-MR context the LLM should weigh heavily ("this is a dep bump", "focus on architecture"). |
+| [`gitlab-ci.yml`](examples/gitlab-ci.yml) | Single-repo CI-driven review — runs on every MR pipeline. Best for small teams that want the simplest possible setup. |
+| [`central-ci.yml`](examples/central-ci.yml) | **Reference template** for org-wide onboarding — producer stages (build / test / lint / vulns / tokensave sync) + mreview stage. Copy into your org's CI templates repo. |
+| [`policy.yaml`](examples/policy.yaml) | Reference policy.yaml file (severity_overrides, forbid, require, labels). Drop at the path passed via `--policy-file`. |
 
-A typical setup uses **two**: copy `config.yaml` for persistent
-connection settings and one of `team-prompt-system.txt` /
-`team-prompt-user.txt` for the LLM guidance. Teams that already
-have CI add `gitlab-ci.yml`. Teams without CI infrastructure use
-`docker-compose.yml` + the webhook setup guide.
+A typical CI-driven setup uses **two**: copy `central-ci.yml`
+into your org's CI library repo, and `policy.yaml` into the
+repo that wants policy enforcement. Teams that run mreview
+locally for development add `docker-compose.yml` +
+`config.yaml`. The team-prompt customization knobs from the
+pre-reset architecture are no longer exposed — the system
+prompt is owned by the embedded
+[`internal/prompts/review_system.md`](internal/prompts/review_system.md)
+and pinned by golden-file tests.
 
 ## License
 
