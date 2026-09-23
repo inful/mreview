@@ -93,6 +93,19 @@ type ServerConfig struct {
 	WebhookSecretEnv string `yaml:"webhook_secret_env"`
 	QueueSize        int    `yaml:"queue_size"`
 	ShutdownTimeout  string `yaml:"shutdown_timeout"`
+
+	// Workers is the steady-state concurrency cap for the worker
+	// pool — the number of simultaneous reviews `mreview serve`
+	// will run. Distinct from QueueSize, which is the burst
+	// buffer (how many webhook deliveries can wait when the pool
+	// is fully busy). Zero or negative means use the default (4).
+	//
+	// Operators on memory-constrained LLM servers (single Ollama
+	// on a Pi, CPU-only llama.cpp on shared hardware) can drop
+	// this; operators sharing an LLM with other tenants tighten
+	// it to leave headroom; operators with a fat LLM (vLLM with
+	// batching, multi-GPU inference) raise it above 4.
+	Workers int `yaml:"workers,omitempty"`
 }
 
 // RetryConfig holds GitLab API retry policy. Applies to every
@@ -147,6 +160,9 @@ func (f *File) Defaults() {
 	if f.Server.ShutdownTimeout == "" {
 		f.Server.ShutdownTimeout = "30s"
 	}
+	// Workers: zero means "use the cmd-layer default" (currently
+	// 4 in server.New). Don't override 0 — let the cmd layer's
+	// "<= 0 → 4" rule apply so the default lives in one place.
 	if f.Retry.MaxAttempts == 0 {
 		f.Retry.MaxAttempts = 4
 	}

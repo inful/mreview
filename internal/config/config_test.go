@@ -187,6 +187,48 @@ func TestValidate_ZeroQueueSize(t *testing.T) {
 	}
 }
 
+// TestParse_WorkersField pins the YAML plumbing for the new
+// server.workers field (issue #35). Zero is preserved — the cmd
+// layer's `<= 0 → 4` rule supplies the default — so the value
+// flows verbatim through Parse.
+func TestParse_WorkersField(t *testing.T) {
+	yaml := `
+gitlab:
+  url: https://gitlab.com
+  token_env: GITLAB_TOKEN
+llm:
+  base_url: http://x
+  model: m
+server:
+  workers: 8
+`
+	f, err := Parse([]byte(yaml))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if f.Server.Workers != 8 {
+		t.Errorf("Workers = %d, want 8", f.Server.Workers)
+	}
+
+	// Omitted field leaves it at the zero value (cmd layer
+	// applies the default).
+	yaml = `
+gitlab:
+  url: https://gitlab.com
+  token_env: GITLAB_TOKEN
+llm:
+  base_url: http://x
+  model: m
+`
+	f, err = Parse([]byte(yaml))
+	if err != nil {
+		t.Fatalf("Parse (no workers): %v", err)
+	}
+	if f.Server.Workers != 0 {
+		t.Errorf("Workers = %d, want 0 (cmd layer applies default)", f.Server.Workers)
+	}
+}
+
 func TestErrNotFoundIsDistinct(t *testing.T) {
 	// ErrNotFound is exported so callers can detect "no file
 	// specified". Just sanity-check it's a non-nil sentinel.

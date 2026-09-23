@@ -21,7 +21,8 @@ import (
 type ServeCmd struct {
 	Addr            string        `default:":8080" name:"addr" env:"MREVIEW_ADDR" help:"HTTP listen address."`
 	WebhookSecret   string        `env:"GITLAB_WEBHOOK_SECRET" name:"webhook-secret" help:"GitLab webhook shared secret."`
-	QueueSize       int           `default:"32" name:"queue-size" env:"MREVIEW_QUEUE_SIZE" help:"Maximum number of concurrent review jobs."`
+	QueueSize       int           `default:"32" name:"queue-size" env:"MREVIEW_QUEUE_SIZE" help:"Burst buffer for webhook deliveries that arrive while the pool is fully busy."`
+	Workers         int           `default:"4" name:"workers" env:"MREVIEW_WORKERS" help:"Maximum number of concurrent review goroutines. Steady-state concurrency cap (distinct from --queue-size, which is the burst buffer). Lower for slow / shared LLMs; raise for batched / fast inference."`
 	ShutdownTimeout time.Duration `default:"30s" name:"shutdown-timeout" env:"MREVIEW_SHUTDOWN_TIMEOUT" help:"Time to wait for in-flight reviews on shutdown."`
 	RequiredLabel   string        `name:"required-label" env:"MREVIEW_REQUIRED_LABEL" help:"Only review MRs carrying this GitLab label (e.g. 'mreview'). Empty reviews every MR."`
 
@@ -130,6 +131,7 @@ func runServe(parentCtx context.Context, stdout io.Writer, c *ServeCmd, cfg *con
 		Logger:          logger,
 		ShutdownTimeout: c.ShutdownTimeout,
 		QueueSize:       c.QueueSize,
+		Workers:         c.Workers,
 		RequiredLabel:   c.RequiredLabel,
 	})
 	if err != nil {
