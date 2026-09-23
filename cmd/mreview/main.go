@@ -25,6 +25,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 
 	"github.com/alecthomas/kong"
@@ -147,6 +148,11 @@ func run(parentCtx context.Context, args []string, stdout, stderr io.Writer) (ex
 // and the operator has GITLAB_TOKEN_FOO set in their secret
 // store, we copy its value to GITLAB_TOKEN (the env-var the
 // CLI flags expect).
+//
+// The bindings are listed once in a table below; each entry's
+// get function returns the value (or "" to skip). Adding a new
+// config → env mapping is a one-line table addition. The
+// exhaustive-coverage test in main_test.go pins every binding.
 func applyConfigToEnv(cfg *config.File) func() {
 	type op struct {
 		key string
@@ -169,71 +175,99 @@ func applyConfigToEnv(cfg *config.File) func() {
 		_ = os.Setenv(key, value)
 	}
 
-	if v := cfg.GitLab.URL; v != "" {
-		set("GITLAB_URL", v)
+	bindings := []struct {
+		key string
+		get func(*config.File) string
+	}{
+		// GitLab connection.
+		{"GITLAB_URL", func(c *config.File) string { return c.GitLab.URL }},
+		{"GITLAB_TOKEN", func(c *config.File) string {
+			if c.GitLab.TokenEnv == "" {
+				return ""
+			}
+			return os.Getenv(c.GitLab.TokenEnv)
+		}},
+
+		// LLM connection.
+		{"LLM_URL", func(c *config.File) string { return c.LLM.BaseURL }},
+		{"LLM_MODEL", func(c *config.File) string { return c.LLM.Model }},
+		{"LLM_API_KEY", func(c *config.File) string {
+			if c.LLM.APIKeyEnv == "" {
+				return ""
+			}
+			return os.Getenv(c.LLM.APIKeyEnv)
+		}},
+
+		// Review tunables.
+		{"GITLAB_BOT_USERNAME", func(c *config.File) string { return c.Review.BotUsernameEnv }},
+		{"MREVIEW_MAX_DIFF_BYTES", func(c *config.File) string {
+			if c.Review.MaxDiffBytes == 0 {
+				return ""
+			}
+			return strconv.Itoa(c.Review.MaxDiffBytes)
+		}},
+		{"MREVIEW_TEMPERATURE", func(c *config.File) string {
+			if c.Review.Temperature == 0 {
+				return ""
+			}
+			return strconv.FormatFloat(c.Review.Temperature, 'g', -1, 64)
+		}},
+		{"MREVIEW_MAX_TOKENS", func(c *config.File) string {
+			if c.Review.MaxTokens == 0 {
+				return ""
+			}
+			return strconv.Itoa(c.Review.MaxTokens)
+		}},
+		{"MREVIEW_PER_CHUNK_TIMEOUT", func(c *config.File) string { return c.Review.PerChunkTimeout }},
+		{"MREVIEW_CHUNK_RETRIES", func(c *config.File) string {
+			if c.Review.ChunkRetries == 0 {
+				return ""
+			}
+			return strconv.Itoa(c.Review.ChunkRetries)
+		}},
+		{"MREVIEW_ALLOW_PARTIAL", func(c *config.File) string {
+			if !c.Review.AllowPartial {
+				return ""
+			}
+			return "true"
+		}},
+
+		// Server.
+		{"GITLAB_WEBHOOK_SECRET", func(c *config.File) string {
+			if c.Server.WebhookSecretEnv == "" {
+				return ""
+			}
+			return os.Getenv(c.Server.WebhookSecretEnv)
+		}},
+		{"MREVIEW_ADDR", func(c *config.File) string { return c.Server.Addr }},
+		{"MREVIEW_QUEUE_SIZE", func(c *config.File) string {
+			if c.Server.QueueSize == 0 {
+				return ""
+			}
+			return strconv.Itoa(c.Server.QueueSize)
+		}},
+		{"MREVIEW_WORKERS", func(c *config.File) string {
+			if c.Server.Workers == 0 {
+				return ""
+			}
+			return strconv.Itoa(c.Server.Workers)
+		}},
+		{"MREVIEW_SHUTDOWN_TIMEOUT", func(c *config.File) string { return c.Server.ShutdownTimeout }},
+
+		// Retry.
+		{"MREVIEW_RETRIES", func(c *config.File) string {
+			// --retries = MaxAttempts - 1.
+			if c.Retry.MaxAttempts == 0 {
+				return ""
+			}
+			return strconv.Itoa(c.Retry.MaxAttempts - 1)
+		}},
+		{"MREVIEW_RETRY_BACKOFF", func(c *config.File) string { return c.Retry.InitialBackoff }},
+		{"MREVIEW_RETRY_MAX_BACKOFF", func(c *config.File) string { return c.Retry.MaxBackoff }},
 	}
-	if cfg.GitLab.TokenEnv != "" {
-		if v := os.Getenv(cfg.GitLab.TokenEnv); v != "" {
-			set("GITLAB_TOKEN", v)
-		}
-	}
-	if v := cfg.LLM.BaseURL; v != "" {
-		set("LLM_URL", v)
-	}
-	if v := cfg.LLM.Model; v != "" {
-		set("LLM_MODEL", v)
-	}
-	if cfg.LLM.APIKeyEnv != "" {
-		if v := os.Getenv(cfg.LLM.APIKeyEnv); v != "" {
-			set("LLM_API_KEY", v)
-		}
-	}
-	if v := cfg.Review.BotUsernameEnv; v != "" {
-		set("GITLAB_BOT_USERNAME", v)
-	}
-	if cfg.Server.WebhookSecretEnv != "" {
-		if v := os.Getenv(cfg.Server.WebhookSecretEnv); v != "" {
-			set("GITLAB_WEBHOOK_SECRET", v)
-		}
-	}
-	if v := cfg.Review.MaxDiffBytes; v > 0 {
-		set("MREVIEW_MAX_DIFF_BYTES", intToStr(v))
-	}
-	if v := cfg.Review.Temperature; v > 0 {
-		set("MREVIEW_TEMPERATURE", floatToStr(v))
-	}
-	if v := cfg.Review.MaxTokens; v > 0 {
-		set("MREVIEW_MAX_TOKENS", intToStr(v))
-	}
-	if v := cfg.Review.PerChunkTimeout; v != "" {
-		set("MREVIEW_PER_CHUNK_TIMEOUT", v)
-	}
-	if v := cfg.Review.ChunkRetries; v > 0 {
-		set("MREVIEW_CHUNK_RETRIES", intToStr(v))
-	}
-	if v := cfg.Review.AllowPartial; v {
-		set("MREVIEW_ALLOW_PARTIAL", "true")
-	}
-	if v := cfg.Server.Addr; v != "" {
-		set("MREVIEW_ADDR", v)
-	}
-	if v := cfg.Server.QueueSize; v > 0 {
-		set("MREVIEW_QUEUE_SIZE", intToStr(v))
-	}
-	if v := cfg.Server.Workers; v > 0 {
-		set("MREVIEW_WORKERS", intToStr(v))
-	}
-	if v := cfg.Server.ShutdownTimeout; v != "" {
-		set("MREVIEW_SHUTDOWN_TIMEOUT", v)
-	}
-	if v := cfg.Retry.MaxAttempts; v > 0 {
-		set("MREVIEW_RETRIES", intToStr(v-1)) // --retries = MaxAttempts - 1
-	}
-	if v := cfg.Retry.InitialBackoff; v != "" {
-		set("MREVIEW_RETRY_BACKOFF", v)
-	}
-	if v := cfg.Retry.MaxBackoff; v != "" {
-		set("MREVIEW_RETRY_MAX_BACKOFF", v)
+
+	for _, b := range bindings {
+		set(b.key, b.get(cfg))
 	}
 
 	return func() {
@@ -245,14 +279,6 @@ func applyConfigToEnv(cfg *config.File) func() {
 			}
 		}
 	}
-}
-
-func intToStr(n int) string {
-	return fmt.Sprintf("%d", n)
-}
-
-func floatToStr(f float64) string {
-	return fmt.Sprintf("%g", f)
 }
 
 // exitCodeFromError maps an error to a process exit code, as documented
