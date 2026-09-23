@@ -1,0 +1,161 @@
+# Reference central CI workflow for mreview
+#
+# This file is a REFERENCE TEMPLATE, not the source-of-truth
+# central CI definition. The actual central CI workflow lives
+# wherever the org keeps its reusable workflows (typically a
+# `ci-templates` or `.gitlab-ci.yml` library repo). mreview
+# ships this template so operators can copy it into their org's
+# CI repo verbatim.
+#
+# What this workflow does:
+#
+#   1. Producer stages (build / test / lint / vulns) run in
+#      parallel. Each writes one artifact to
+#      `.mreview-artifacts/`. mreview reads these at startup.
+#
+#   2. A tokensave-sync stage indexes the repo's code graph.
+#      One-shot; the MCP server itself is spawned by mreview
+#      at runtime.
+#
+#   3. The mreview stage fetches the MR from GitLab, asks the
+#      harness agent to produce inline + summary findings,
+#      and posts them back to the MR via the GitLab API.
+#
+# Per-event branching: this workflow's `rules:` filter when
+# mreview is invoked. The internal per-event guard (issue #41)
+# handles the rest (draft skip, push source opt-in, etc.).
+# See README → "Behaviour by event".
+#
+# Authentication: the workflow uses a Personal Access Token via
+# the GITLAB_TOKEN_CI variable (Project → Settings → CI/CD →
+# Variables, masked, protected, `api` scope).
+
+stages:
+  - build
+  - test
+  - lint
+  - vulns
+  - index
+  - review
+
+variables:
+  MREVIEW_ARTIFACTS_DIR: .mreview-artifacts
+  TOKENSAVE_DB: .tokensave
+
+# ─── Producer stages (parallel) ─────────────────────────────────
+# Each producer writes ONE artifact. The `tee` / `|| true`
+# pattern lets the producer stage succeed (exit 0) even when
+# its tool reports a problem — the failure signal lives in
+# the artifact, which mreview reads at startup. mreview's
+# review-status exit code is independent of any individual
+# producer's exit code.
+
+go-build:
+  stage: build
+  image: golang:1.26
+  script:
+    - mkdir -p "$MREVIEW_ARTIFACTS_DIR"
+    - go build ./... 2>&1 | tee "$MREVIEW_ARTIFACTS_DIR/build.log"
+  artifacts:
+    paths:
+      - .mreview-artifacts/build.log
+    expire_in: 1 hour
+
+go-test:
+  stage: test
+  image: golang:1.26
+  script:
+    - mkdir -p "$MREVIEW_ARTIFACTS_DIR"
+    - go test -json -race -count=1 ./... > "$MREVIEW_ARTIFACTS_DIR/test_results.json" 2>&1 || true
+  artifacts:
+    paths:
+      - .mreview-artifacts/test_results.json
+    expire_in: 1 hour
+
+golangci-lint:
+  stage: lint
+  image: golangci/golangci-lint:latest
+  script:
+    - mkdir -p "$MREVIEW_ARTIFACTS_DIR"
+    - golangci-lint run --out-format=json ./... > "$MREVIEW_ARTIFACTS_DIR/lint.json" 2>&1 || true
+  artifacts:
+    paths:
+      - .mreview-artifacts/lint.json
+    expire_in: 1 hour
+
+govulncheck:
+  stage: vulns
+  image: golang:1.26
+  script:
+    - mkdir -p "$MREVIEW_ARTIFACTS_DIR"
+    - go install golang.org/x/vuln/cmd/govulncheck@latest
+    - govulncheck ./... > "$MREVIEW_ARTIFACTS_DIR/vulns.json" 2>&1 || true
+  artifacts:
+    paths:
+      - .mreview-artifacts/vulns.json
+    expire_in: 1 hour
+
+# ─── tokensave sync ──────────────────────────────────────────────
+# One-shot indexing. The MCP server itself is spawned inside
+# mreview's runtime — this stage just primes the cache so the
+# agent's first code-graph query is fast.
+tokensave-sync:
+  stage: index
+  image: your-registry/tokensave:latest
+  script:
+    - tokensave sync --project-root "$CI_PROJECT_DIR" --db "$TOKENSAVE_DB"
+  cache:
+    key: tokensave-$CI_COMMIT_REF_SLUG
+    paths:
+      - .tokensave
+
+# ─── mreview ────────────────────────────────────────────────────
+# The per-event filter (issue #41) lives inside mreview
+# itself, not in the YAML's `rules:`. The YAML's rules filter
+# when mreview is invoked; mreview's internal guard handles
+# the rest. See README → "Behaviour by event".
+mreview:
+  stage: review
+  image: ghcr.io/inful/mreview:latest
+  variables:
+    LLM_URL: http://localhost:11434/v1
+    LLM_MODEL: qwen2.5-coder:7b
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_PIPELINE_SOURCE == "web"'
+    - if: '$CI_PIPELINE_SOURCE == "api"'
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+  needs:
+    - go-build
+    - go-test
+    - golangci-lint
+    - govulncheck
+    - tokensave-sync
+  script:
+    - mreview review
+        --repo="$CI_PROJECT_PATH"
+        --mr="$CI_MERGE_REQUEST_IID"
+        --gitlab-url="$CI_SERVER_URL"
+        --gitlab-token="$GITLAB_TOKEN_CI"
+        --provider=local
+        --provider-base-url="$LLM_URL"
+        --model="$LLM_MODEL"
+        --workdir="$CI_PROJECT_DIR"
+        --artifacts-dir="$MREVIEW_ARTIFACTS_DIR"
+        --log-format=json
+  allow_failure: true
+  tags:
+    - docker
+
+# Surface the bot's MR URL in the pipeline output so the
+# developer can click through to the review from the
+# pipeline view.
+mreview-summary:
+  stage: review
+  image: alpine:3
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+  script:
+    - echo "Review posted to $CI_MERGE_REQUEST_PROJECT_URL/-/merge_requests/$CI_MERGE_REQUEST_IID"
+  needs:
+    - mreview
