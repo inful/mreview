@@ -92,13 +92,11 @@ func (p *Pool) Submit(job Job) error {
 	}
 }
 
-// start launches the workers. n defaults to capacity (bounded
-// parallelism matches the queue size). Currently uses 4
-// hard-coded because an Ollama on modest hardware serves one
-// request at a time anyway; bump this when a real LLM with
-// batching comes along.
-func (p *Pool) start(ctx context.Context, handler JobHandler) {
-	const workers = 4
+// start launches the workers. The count comes from the caller
+// (typically Config.Workers, defaulted to 4 by server.New). The
+// pool's worker count is independent of the queue depth — see
+// Config.Workers documentation for why.
+func (p *Pool) start(ctx context.Context, handler JobHandler, workers int) {
 	for i := 0; i < workers; i++ {
 		p.done.Add(1)
 		go p.runWorker(ctx, handler)

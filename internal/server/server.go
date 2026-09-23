@@ -78,6 +78,24 @@ type Config struct {
 	// 0 means use the default (32). Applied before start; not
 	// adjustable at runtime.
 	QueueSize int
+
+	// Workers is the size of the worker pool — the steady-state
+	// concurrency cap on simultaneous reviews. 0 means use the
+	// default (4). Distinct from QueueSize, which is the burst
+	// buffer (how many webhook deliveries can wait when the pool
+	// is fully busy).
+	//
+	// Memory-constrained LLM servers (single Ollama on a Pi,
+	// CPU-only llama.cpp on shared hardware) benefit from dropping
+	// this; operators sharing an LLM with other tenants tighten it
+	// to leave headroom; operators with a fat LLM (vLLM with
+	// batching, multi-GPU inference) raise it above 4 to use the
+	// box fully.
+	//
+	// Not yet exposed via the CLI / YAML — see issue #35 for the
+	// operator-facing wiring. The plumbing here is so that
+	// follow-up doesn't need to re-plumb.
+	Workers int
 }
 
 // JobHandler is invoked for each verified webhook event.
@@ -115,6 +133,9 @@ func New(cfg Config) (*Server, error) {
 	}
 	if cfg.ShutdownTimeout == 0 {
 		cfg.ShutdownTimeout = 30 * time.Second
+	}
+	if cfg.Workers <= 0 {
+		cfg.Workers = 4
 	}
 
 	pool := newPool(cfg.Logger)
@@ -168,7 +189,7 @@ func (s *Server) Run(ctx context.Context) error {
 	// Start the worker pool. ctx.Done() triggers drain.
 	poolCtx, poolCancel := context.WithCancel(ctx)
 	defer poolCancel()
-	s.pool.start(poolCtx, s.cfg.Handler)
+	s.pool.start(poolCtx, s.cfg.Handler, s.cfg.Workers)
 
 	// Throttle sweep: drop entries older than the window so the
 	// map self-cleans on idle instances. The window is short

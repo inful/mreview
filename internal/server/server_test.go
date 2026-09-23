@@ -332,6 +332,57 @@ func TestNew_RejectsMissingFields(t *testing.T) {
 	}
 }
 
+// TestNew_WorkersDefaults pins the default behaviour for
+// Config.Workers when the caller leaves it at the zero value.
+// Mirrors the defaults applied to QueueSize / ShutdownTimeout /
+// ReadHeaderTimeout above, and keeps issue #35 (the CLI-flag
+// follow-up) honest about the constant value.
+func TestNew_WorkersDefaults(t *testing.T) {
+	srv, err := New(Config{
+		Addr:          ":0",
+		WebhookSecret: "x",
+		Handler:       func(context.Context, Job) {},
+		Logger:        slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if srv.cfg.Workers != 4 {
+		t.Errorf("Workers default = %d, want 4", srv.cfg.Workers)
+	}
+
+	// An explicit value must be respected (no clamping).
+	srv, err = New(Config{
+		Addr:          ":0",
+		WebhookSecret: "x",
+		Handler:       func(context.Context, Job) {},
+		Logger:        slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Workers:       8,
+	})
+	if err != nil {
+		t.Fatalf("New (Workers=8): %v", err)
+	}
+	if srv.cfg.Workers != 8 {
+		t.Errorf("Workers = %d, want 8 (caller-supplied)", srv.cfg.Workers)
+	}
+
+	// Negative values are treated as zero and defaulted (matches
+	// the <= 0 guard in New).
+	srv, err = New(Config{
+		Addr:          ":0",
+		WebhookSecret: "x",
+		Handler:       func(context.Context, Job) {},
+		Logger:        slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Workers:       -3,
+	})
+	if err != nil {
+		t.Fatalf("New (Workers=-3): %v", err)
+	}
+	if srv.cfg.Workers != 4 {
+		t.Errorf("Workers default = %d for negative input, want 4", srv.cfg.Workers)
+	}
+}
+
 func TestErrQueueFull_Error(t *testing.T) {
 	if ErrQueueFull.Error() == "" {
 		t.Error("expected non-empty error message")
