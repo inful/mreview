@@ -8,6 +8,63 @@ After v0.1.0, entries are generated from conventional commits by
 GoReleaser. The hand-written entries below document the initial
 release.
 
+## [0.4.1]
+
+### Added
+
+- **Debug-level LLM logs under `--verbose`** (#26). Operators running
+  with `--verbose` were seeing no extra output during successful
+  review runs because no Debug-level logs fired between the LLM call
+  and the result — the essential diagnostic for "the model produced
+  `findings: []` but the summary mentions real issues" was missing.
+  mreview now logs `llm prompt`, `llm raw response`, `llm merge
+  prompt`, and `llm merge raw response` at Debug level so operators
+  can confirm what the model actually sees and produces without
+  reaching for external tooling.
+
+### Fixed
+
+- **Findings are now reliably recovered through the LLM review
+  pipeline** (#25). Three distinct failure modes were dropping or
+  fabricating findings between the chunk LLMs and the final MR
+  post: capable local models emitted `findings: []` alongside
+  multi-paragraph summaries listing real bugs (the model had the
+  data, it just chose not to put it in the array); the merge LLM
+  was renaming `body` to `message` so every merged finding was
+  silently dropped by the empty-body filter; and the merge LLM was
+  hallucinating new claims (e.g. "MR contains no Go source code")
+  because the chunk LLMs' empty finding slices gave it no signal
+  about file scope. The pipeline now requires findings as the
+  primary output (summary is a recap, not a substitute), preserves
+  the Finding schema inline in the merge prompt with an explicit
+  anti-rename guard, forbids the merge LLM from synthesising new
+  findings ("reducer, not a generator"), and threads prior-batch
+  findings into the next chunk's prompt so later chunks (and the
+  merge step) have ground truth about earlier batches' scope.
+
+- **Truncated LLM responses no longer lose every finding** (#25).
+  When the LLM hit `MaxTokens` or the stream was cut mid-finding,
+  all three prior parsing strategies failed because no closing
+  delimiter ever arrived — raw `Unmarshal` hit `ErrUnexpectedEOF`,
+  no fence was present, and the loose brace-matcher never balanced.
+  A fourth strategy uses `json.Decoder` to walk the response and
+  recover whichever findings completed before the cut; partial
+  findings at the truncation point are silently dropped. The
+  final parse-failure error now distinguishes "response appears
+  truncated — raise `MaxTokens` or batch size" from "response is
+  structurally unbalanced but does not look truncated — likely
+  invalid JSON from LLM", so operators reading parse-failure logs
+  get an actionable diagnostic at a glance.
+
+- **`golangci-lint v2 schema compliance** in `.golangci.yml`. The
+  config had a top-level `exclusions:` block that
+  `golangci-lint v2.13.2`'s strict schema rejects
+  (`additional properties 'exclusions' not allowed`), which had
+  been blocking the `Lint & test` CI check on every push since
+  2026-09-22. Moved to `linters.exclusions` and dropped the v1
+  `default:` field, leaving an empty rules list with no
+  behavioural change for this repo.
+
 ## [0.4.0]
 
 ### Added
@@ -218,7 +275,8 @@ The AGPL network clause applies: anyone running a modified
 mreview as a service that others interact with over a network
 must provide the source of their modifications to those users.
 
-[Unreleased]: https://github.com/inful/mreview/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/inful/mreview/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/inful/mreview/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/inful/mreview/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/inful/mreview/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/inful/mreview/compare/v0.2.0...v0.3.0
