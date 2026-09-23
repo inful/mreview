@@ -15,13 +15,19 @@
 # tokensave's older `mcp --project-root` shape is no longer used.
 
 # Stage 1: download + verify + unpack the pinned tokensave release.
+#
+# Alpine's busybox ships wget but not curl; we install curl
+# explicitly because the GitHub API download needs
+# `-fsSL` semantics (fail on HTTP error, follow redirects,
+# silent). Busybox wget has no fail-on-error flag.
 FROM alpine:3.20 AS tokensave
 ARG TARGETARCH
 ARG TOKENSAVE_VERSION=7.12.1
 ARG TOKENSAVE_SHA_AMD64=184612db16800e384a1bcdc7fadcc53fa73bda70240f9c0416ac4b88c7e924fb
 ARG TOKENSAVE_SHA_ARM64=7de5c95b51d508f39a83d9420ad0700502de107a61dbb38dad3d008d4f6f4261
 
-RUN set -eux; \
+RUN apk add --no-cache curl \
+ && set -eux; \
     case "${TARGETARCH}" in \
         amd64) SHA="${TOKENSAVE_SHA_AMD64}"; ASSET="x86_64"  ;; \
         arm64) SHA="${TOKENSAVE_SHA_ARM64}"; ASSET="aarch64" ;; \
