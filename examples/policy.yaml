@@ -1,0 +1,57 @@
+# Reference policy.yaml for mreview.
+#
+# This file is a starting point — copy it to your repo, edit it,
+# and pass the path to mreview via --policy-file or
+# MREVIEW_POLICY_FILE.
+#
+# The schema is locked in by issue #42's migration step 2
+# (architecture reset). Adding new sections is fine; renaming or
+# removing existing ones is a breaking change.
+#
+# See README.md > "Policy enforcement" for the full behaviour
+# table. The Go types live in internal/policy/schema.go.
+
+# ─── severity_overrides ─────────────────────────────────────────
+# Escalate any finding on a file matching the doublestar glob to
+# the configured severity. First match wins; weaker overrides
+# don't downgrade an already-stronger verdict.
+severity_overrides:
+  - pattern: "**/*.go"
+    severity: error            # any finding on .go files becomes error
+
+  - pattern: "internal/security/**"
+    severity: error
+
+  - pattern: "docs/**"
+    severity: info              # doc changes get info-level findings only
+
+# ─── forbid ─────────────────────────────────────────────────────
+# Regex match against the content of every file in the MR. On
+# match, mreview adds a synthetic error finding (rendered as a
+# GitLab comment) and the review exits with ExitPolicy (8).
+forbid:
+  - id: no-todo-comments
+    pattern: "TODO"
+    message: "TODO comments are not allowed in main branches"
+
+  - id: no-fmt-prints
+    pattern: 'fmt\.Print(ln)?\('
+    message: "Use the structured logger (slog) instead of fmt.Print*"
+
+# ─── require ────────────────────────────────────────────────────
+# Doublestar glob must match at least one path in the MR. On miss,
+# mreview adds a synthetic error finding and exits with ExitPolicy.
+# Use for "if you touched X, you must also touch Y" rules.
+require:
+  - id: has-tests-for-internal
+    pattern: "internal/**/*_test.go"
+    message: "MRs touching internal/ must include a test file"
+
+# ─── labels ─────────────────────────────────────────────────────
+# When the MR carries one of these labels (from
+# CI_MERGE_REQUEST_LABELS), every finding's verdict is escalated
+# to the configured severity. Strongest escalation wins.
+labels:
+  "security-review": error     # any MR flagged security-review is taken seriously
+  "breaking-change": error
+  "wip": info                  # WIP MRs are reviewed lightly

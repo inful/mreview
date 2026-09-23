@@ -13,6 +13,7 @@ import (
 	"github.com/inful/mreview/internal/event"
 	"github.com/inful/mreview/internal/gitlab"
 	"github.com/inful/mreview/internal/llm"
+	"github.com/inful/mreview/internal/policy"
 	"github.com/inful/mreview/internal/reviewer"
 )
 
@@ -115,6 +116,17 @@ type ReviewCmd struct {
 	OnDrafts string `default:"skip" name:"on-drafts" enum:"run,skip" env:"MREVIEW_ON_DRAFTS" help:"Action on draft MRs (CI_MERGE_REQUEST_DRAFT=true): run the review or skip with exit 0. Default skip."`
 	OnPush   string `default:"skip" name:"on-push" enum:"run,skip" env:"MREVIEW_ON_PUSH" help:"Action on direct branch pushes (CI_PIPELINE_SOURCE=push): run the review or skip with exit 0. Default skip."`
 
+	// PolicyFile points at a YAML file with the policy schema
+	// documented in `internal/policy`. Empty = no policy (the
+	// review runs without severity overrides, forbid rules, or
+	// require rules). The file is loaded and validated at
+	// startup; a malformed policy returns ExitConfig before any
+	// GitLab / harness work happens. The enforcer call itself
+	// lands in PR #3 with the orchestrator; PR #2 ships the
+	// package + flag + load-only path so operators can start
+	// authoring policy.yaml files against the locked schema.
+	PolicyFile string `name:"policy-file" env:"MREVIEW_POLICY_FILE" type:"path" help:"Path to a YAML policy file (severity_overrides, forbid, require, labels). Empty = no policy. See internal/policy for the schema."`
+
 	// Verbose is intentionally NOT declared here — it lives on
 	// the parent CLI struct so it's accepted globally. Declaring
 	// it again on ReviewCmd would shadow and produce a "duplicate
@@ -150,6 +162,28 @@ func runReview(stdout io.Writer, c *ReviewCmd, cfg *config.File, logger *slog.Lo
 		logger.Info("proceeding with review per override",
 			"reason", decision.Reason,
 			"source", ev.Source,
+		)
+	}
+
+	// Policy load (issue #42 migration step 2).
+	//
+	// We load and validate the policy at startup so a malformed
+	// file fails fast with ExitConfig — before any GitLab /
+	// harness work happens. The actual enforcement call lives
+	// in PR #3 (orchestrator); PR #2 ships the package + flag +
+	// load-only path so operators can start authoring
+	// policy.yaml files against the locked schema.
+	if c.PolicyFile != "" {
+		pol, err := policy.Load(c.PolicyFile)
+		if err != nil {
+			return logWithError(logger, ExitConfig, "policy file", err)
+		}
+		logger.Info("policy loaded",
+			"path", c.PolicyFile,
+			"severity_overrides", len(pol.SeverityOverrides),
+			"forbid_rules", len(pol.Forbid),
+			"require_rules", len(pol.Require),
+			"label_rules", len(pol.Labels),
 		)
 	}
 

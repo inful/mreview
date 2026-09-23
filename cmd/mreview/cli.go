@@ -20,6 +20,12 @@ const (
 	ExitConflict  = 5 // conflict (line anchor out of range, stale MR head)
 	ExitTransient = 6 // transient failure exhausted (5xx/429 retries exhausted)
 	ExitInternal  = 7 // unexpected internal error
+	// ExitPolicy is set when `policy.yaml` produces at least one
+	// error-verdict finding (or any forbid/require rule fires).
+	// Distinct from ExitInternal so CI scripts can tell "policy
+	// said no" apart from "review crashed." Introduced by
+	// migration step 2 of #42 (architecture reset).
+	ExitPolicy = 8
 )
 
 // DefaultConfigPath is the conventional location for the user's

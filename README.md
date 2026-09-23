@@ -27,6 +27,8 @@ https://gitlab.example.com/group/project/-/merge_requests/42
 - [Install](#install)
 - [Quickstart](#quickstart)
 - [Subcommands](#subcommands)
+- [Behaviour by event](#behaviour-by-event)
+- [Policy enforcement](#policy-enforcement)
 - [What the bot posts](#what-the-bot-posts)
 - [Exit codes](#exit-codes)
 - [GitLab webhook setup (for `serve`)](#gitlab-webhook-setup-for-serve)
@@ -202,6 +204,9 @@ Flags:
       --on-push=skip                              Action on direct branch pushes
                                                     (CI_PIPELINE_SOURCE=push): run the review or
                                                     skip with exit 0. Default skip.
+      --policy-file=STRING                        Path to a YAML policy file (severity_overrides,
+                                                    forbid, require, labels). Empty = no policy.
+                                                    See "Policy enforcement" below for the schema.
       --dry-run                                   Log intended LLM and GitLab calls without performing them.
 ```
 
@@ -311,6 +316,67 @@ ergonomics.
 The per-event *content* of the review (incremental vs full, summary
 post, dedupe baseline) is the orchestrator's concern — see `internal/reviewer/`.
 
+## Policy enforcement
+
+A YAML policy file (passed via `--policy-file` / `$MREVIEW_POLICY_FILE`)
+escalates or rejects findings before they're posted to GitLab.
+The schema is locked in by [issue #42's migration step 2][issue-42]
+(architecture reset) — adding new sections is fine, renaming or
+removing existing ones is a breaking change.
+
+```yaml
+# policy.yaml — escalation and synthesis rules
+severity_overrides:
+  - pattern: "**/*.go"
+    severity: error          # any finding on .go files becomes error
+  - pattern: "internal/security/**"
+    severity: error
+
+forbid:
+  - id: no-todo-comments
+    pattern: "TODO"
+    message: "TODO comments are not allowed in main"
+  - id: no-fmt-prints
+    pattern: 'fmt\.Print(ln)?\('
+    message: "use the structured logger (slog) instead of fmt.Print*"
+
+require:
+  - id: has-tests
+    pattern: "internal/**/*_test.go"
+    message: "MRs touching internal/ must include a test file"
+
+labels:
+  "security-review": error    # when the MR has this label, escalate everything
+  "breaking-change": error
+```
+
+[issue-42]: https://github.com/inful/mreview/issues/42
+
+**Behaviour:**
+
+| Section             | Effect                                                                                |
+|---------------------|---------------------------------------------------------------------------------------|
+| `severity_overrides` | Escalates findings whose `file` matches the doublestar glob to the configured severity. First match wins. Weaker overrides don't downgrade. |
+| `forbid`            | Regex match against the content of every file in the MR. On match, adds a synthetic `error` finding. |
+| `require`           | Doublestar glob must match at least one path in the MR. On miss, adds a synthetic `error` finding. |
+| `labels`            | When the MR carries one of these labels (from `CI_MERGE_REQUEST_LABELS`), every finding's verdict is escalated to the configured severity. Strongest escalation wins. |
+
+**Exit-code semantics:**
+
+- Any `error`-verdict finding (or any `forbid` / `require` rule firing) → the review exits with code **`8` (`ExitPolicy`)**, distinct from `7` (`ExitInternal`, "review crashed").
+- `warning`-verdict findings surface on the MR but don't fail the review.
+- `info`-verdict findings are logged.
+
+**Validation:**
+
+The file is loaded and validated at startup — unknown top-level
+fields, invalid glob/regex patterns, bad severity values, and
+missing required IDs all return `ExitConfig` (2) before any
+GitLab / harness work happens.
+
+See [`internal/policy/`](internal/policy/) for the schema types
+and the [`examples/policy.yaml`](examples/policy.yaml) reference.
+
 ## What the bot posts
 
 A successful review produces **one summary note** + **zero or more
@@ -401,12 +467,13 @@ hit a real MR.
 | Code | Meaning                                          |
 |------|--------------------------------------------------|
 | `0`  | Success                                          |
-| `2`  | Configuration error (missing flag, bad flag, missing config) |
+| `2`  | Configuration error (missing flag, bad flag, missing config, malformed policy file) |
 | `3`  | Authentication error (GitLab or LLM rejected)    |
 | `4`  | Not found (MR, project, model)                   |
 | `5`  | Conflict (line anchor out of range, stale MR head) |
 | `6`  | Transient failure exhausted (5xx / 429 retries)  |
 | `7`  | Unexpected internal error, or atomic chunk failure (see issue #31) |
+| `8`  | Policy violation — at least one `error`-verdict finding (or any `forbid` / `require` rule fired) per `policy.yaml`. Distinct from `7` so CI scripts can tell "policy said no" apart from "review crashed." |
 
 CI scripts can branch on these. `mreview review` and `mreview serve`
 follow the same table; `mreview doctor` uses 0 / 1 (it always runs to
