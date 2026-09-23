@@ -8,6 +8,67 @@ After v0.1.0, entries are generated from conventional commits by
 GoReleaser. The hand-written entries below document the initial
 release.
 
+## [0.5.0]
+
+### Added
+
+- **Chunk-level retry mechanism with `--chunk-retries` flag** (#17).
+  When a chunk's LLM call fails with a transient error (currently:
+  per-call timeout), the reviewer retries the same chunk up to N
+  times before giving up. Exponential backoff: 500 ms, 1 s, 2 s,
+  … capped at 5 s. Default 1 (one retry, two total attempts per
+  chunk). The openai-go client's own `MaxRetries=2` still catches
+  5xx / 429 at the transport layer; this layer catches the timeout
+  case that bubbles past it. Each retry attempt logs at Debug; the
+  final exhaustion logs at Warn. Env: `MREVIEW_CHUNK_RETRIES`.
+  YAML: `review.chunk_retries`.
+- **`--allow-partial` escape hatch for atomic-failure** (#31). When
+  false (the default), any chunk failure aborts the review with a
+  `*ChunkFailureError` before posting anything to GitLab. When
+  true, the legacy "log a warn and continue with empty findings"
+  path is restored. Use this on big MRs where one bad chunk isn't
+  worth aborting the whole run. Env: `MREVIEW_ALLOW_PARTIAL`.
+  YAML: `review.allow_partial`.
+
+### Changed
+
+- **Reviews now fail atomically when a chunk can't be reviewed**
+  (#31). Previously, when a chunk's LLM call failed after retries,
+  the reviewer substituted an empty result and continued with the
+  chunks that did succeed. The merge step's "fallback concatenation"
+  path silently filled in — the summary note still got posted even
+  though the operator couldn't tell the difference between a bot
+  that said "LGTM" on a partial review and one that said "LGTM" on
+  a full review. After this release, the default behaviour is
+  atomic failure: the whole review aborts before anything posts,
+  the CLI exits 7, and the operator re-runs. The error message
+  carries the batch index, file list, attempt count, and underlying
+  error so the failure is actionable. Use `--allow-partial=true`
+  for the previous behaviour.
+
+### Refactored
+
+- **Split `internal/reviewer/reviewer.go`** (#5) from 917 LOC into
+  eight focused files (`config.go`, `result.go`, `filter.go`,
+  `batch.go`, `format.go`, plus extensions to `dedupe.go` /
+  `post_summary.go` / `summary.go`). The orchestrator itself dropped
+  to 389 LOC. No behaviour change.
+- **Collapsed six duplicated `classify*Error` wrappers** (#3) in
+  `internal/gitlab` into a single
+  `(*Client).classify(method, url, resp, err, extraClassifiers...)`
+  method. The line-range special case in `PostDiscussion` is now
+  passed as an inline classifier closure. The body-extraction
+  logic (priority: upstream `ErrorResponse.Body` → `Message` → live
+  `resp.Body`) is shared by every endpoint, not just
+  `PostDiscussion`. No behaviour change.
+- **Extracted a single shared `truncate` helper** (#4) into a new
+  `internal/strutil` package as `Truncate(s, maxBytes)`, unified on
+  the `"..."` suffix. Five copies (across `cmd/mreview`,
+  `internal/reviewer`, `internal/llm`, `internal/gitlab`) collapsed
+  into one. No behaviour change beyond the suffix string (`"..."`
+  vs the old `"...(truncated)"` in two call sites; the `internal/gitlab`
+  classification test was updated to match).
+
 ## [0.4.1]
 
 ### Added
@@ -275,7 +336,8 @@ The AGPL network clause applies: anyone running a modified
 mreview as a service that others interact with over a network
 must provide the source of their modifications to those users.
 
-[Unreleased]: https://github.com/inful/mreview/compare/v0.4.1...HEAD
+[Unreleased]: https://github.com/inful/mreview/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/inful/mreview/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/inful/mreview/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/inful/mreview/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/inful/mreview/compare/v0.3.0...v0.3.1
