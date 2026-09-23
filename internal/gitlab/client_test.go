@@ -286,6 +286,60 @@ func TestFetchMR_Server422NoRetry(t *testing.T) {
 	}
 }
 
+// TestFetchMR_RetryAfterHeaderHonored is the end-to-end check
+// that the upstream response's Retry-After header reaches the
+// retry pipeline. The first response is 503 with Retry-After: 1,
+// the second is 200. Without header wiring, the retry would fire
+// after a millisecond-scale exponential backoff; with wiring, it
+// waits ~1 second. We assert the elapsed time crossed that
+// threshold (more than the exponential fallback would yield) and
+// stayed under the 60s default RetryAfterCap.
+//
+// Comment-style note: kept short on the CI side (~1s) by choosing
+// delta-seconds=1. A HTTP-date header would also work, but the
+// header value is wall-clock-relative in a way that gets flaky in
+// CI; delta-seconds is the deterministic choice.
+func TestFetchMR_RetryAfterHeaderHonored(t *testing.T) {
+	stub := newGitlabStub(t)
+	// 503 response carrying Retry-After: 1 (delta-seconds).
+	stub.responses = append(stub.responses, stubResponse{
+		status: http.StatusServiceUnavailable,
+		body:   `{"message":"try again"}`,
+		header: http.Header{"Retry-After": []string{"1"}},
+	})
+	stub.responses = append(stub.responses, stubResponse{
+		status: http.StatusOK,
+		body:   mrFixture,
+	})
+
+	c := newTestClient(t, stub.URL)
+	// Tighten everything except the header cap so we can observe
+	// the header-driven wait without enabling the 60s default cap.
+	c.retry.InitialBackoff = 1 * time.Millisecond
+	c.retry.MaxBackoff = 10 * time.Millisecond
+	c.retry.MaxAttempts = 3
+
+	start := time.Now()
+	_, err := c.FetchMR(context.Background(), "group/project", 42)
+	if err != nil {
+		t.Fatalf("FetchMR: %v", err)
+	}
+	elapsed := time.Since(start)
+
+	// 1s header wait, plus a tiny amount of processing overhead.
+	// We use 750ms as the lower bound so the test still passes on
+	// fast machines.
+	if elapsed < 750*time.Millisecond {
+		t.Errorf("expected Retry-After to wait ~1s, total elapsed = %v (header not honored?)", elapsed)
+	}
+	if elapsed > 5*time.Second {
+		t.Errorf("unexpectedly long elapsed = %v (likely stuck on a too-long wait)", elapsed)
+	}
+	if len(stub.requests) != 2 {
+		t.Errorf("expected 2 requests (retry), got %d", len(stub.requests))
+	}
+}
+
 func TestFetchMR_InvalidArgs(t *testing.T) {
 	c := newTestClient(t, "http://unused")
 	cases := []struct {

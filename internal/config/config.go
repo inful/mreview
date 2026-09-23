@@ -220,18 +220,6 @@ func Parse(data []byte) (*File, error) {
 	return f, nil
 }
 
-// MustEnv returns os.Getenv(name) or wraps the missing-variable
-// case with a friendly hint. Empty string is treated as "set".
-// (Not all env-loaded vars are secrets; some are config knobs
-// where empty is a valid value.)
-func MustEnv(name string) (string, error) {
-	v := os.Getenv(name)
-	if v == "" {
-		return "", fmt.Errorf("config: environment variable %s is required", name)
-	}
-	return v, nil
-}
-
 // ErrNotFound is returned when the path argument is empty AND
 // the caller requires a config file. Kept separate so callers can
 // distinguish "no file specified" (use defaults) from

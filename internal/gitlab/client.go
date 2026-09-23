@@ -104,6 +104,12 @@ func (c *Client) classify(method, url string, resp *gl.Response, err error, extr
 		// kind from the status code.
 		e.Body = strutil.Truncate(bodyFromResponse(resp, err), 4096)
 		e.Kind = ClassifyStatus(status)
+		// Capture the Retry-After header verbatim; the retry layer
+		// parses it via parseRetryAfterHeader. Done after the
+		// status-classification switch so the Get() happens once.
+		if resp != nil && resp.Response != nil {
+			e.RetryAfter = resp.Header.Get("Retry-After")
+		}
 	case err != nil:
 		// No response — surface the transport error as the body so
 		// the caller has something concrete in logs.

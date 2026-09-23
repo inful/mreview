@@ -187,25 +187,6 @@ func TestValidate_ZeroQueueSize(t *testing.T) {
 	}
 }
 
-func TestMustEnv_Set(t *testing.T) {
-	t.Setenv("MREVIEW_TEST_ENV", "value")
-	got, err := MustEnv("MREVIEW_TEST_ENV")
-	if err != nil {
-		t.Errorf("MustEnv: %v", err)
-	}
-	if got != "value" {
-		t.Errorf("got %q, want value", got)
-	}
-}
-
-func TestMustEnv_Unset(t *testing.T) {
-	// Use a name that's not in our test environment.
-	t.Setenv("MREVIEW_TEST_MISSING", "")
-	if _, err := MustEnv("MREVIEW_TEST_MISSING"); err == nil {
-		t.Fatal("expected error for missing env")
-	}
-}
-
 func TestErrNotFoundIsDistinct(t *testing.T) {
 	// ErrNotFound is exported so callers can detect "no file
 	// specified". Just sanity-check it's a non-nil sentinel.
