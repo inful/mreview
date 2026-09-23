@@ -42,6 +42,8 @@ type ServeCmd struct {
 	MaxDiffBytes    int           `default:"200000" name:"max-diff-bytes" env:"MREVIEW_MAX_DIFF_BYTES" help:"Per-chunk byte budget."`
 	MaxBatchBytes   int           `name:"max-batch-bytes" env:"MREVIEW_MAX_BATCH_BYTES" help:"Byte budget for packing multiple chunks into one LLM call. 0 (default) = one chunk per call. Raise for large-context models."`
 	PerChunkTimeout time.Duration `default:"120s" name:"per-chunk-timeout" env:"MREVIEW_PER_CHUNK_TIMEOUT" help:"Per-LLM-call timeout."`
+	ChunkRetries    int           `default:"1" name:"chunk-retries" env:"MREVIEW_CHUNK_RETRIES" help:"Chunk-level retry budget for transient errors (timeouts). Default 1."`
+	AllowPartial    bool          `name:"allow-partial" env:"MREVIEW_ALLOW_PARTIAL" help:"On chunk failure, log a warn and continue with empty findings instead of aborting the whole review."`
 	BotUsername     string        `name:"bot-username" env:"GITLAB_BOT_USERNAME" help:"Bot username (for dedupe)."`
 
 	// Retry for GitLab API calls.
@@ -119,6 +121,8 @@ func runServe(parentCtx context.Context, stdout io.Writer, c *ServeCmd, cfg *con
 		MaxTokens:          c.MaxTokens,
 		ReasoningEffort:    llm.ReasoningEffort(c.ReasoningEffort),
 		PerChunkTimeout:    c.PerChunkTimeout,
+		ChunkRetries:       c.ChunkRetries,
+		AllowPartial:       c.AllowPartial,
 		Logger:             logger,
 		DryRun:             false,
 		BotUsername:        c.BotUsername,

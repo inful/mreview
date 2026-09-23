@@ -119,6 +119,32 @@ type Config struct {
 	// context (e.g. "this PR is a WIP, focus on architecture not
 	// naming"). Empty = no extra context.
 	UserPromptSuffix string
+
+	// ChunkRetries is the chunk-level retry budget. When a chunk
+	// call returns a transient error (currently: per-call
+	// timeout, see isTransientLLMError), the reviewer retries
+	// the same chunk up to ChunkRetries more times before
+	// giving up. The total attempt count per chunk is
+	// 1 + ChunkRetries. Default 1 (set by validateConfig when
+	// zero). Negative is rejected by NewReviewer.
+	//
+	// The chunk-level retry catches the timeout case that
+	// bubbles past the openai-go client's own MaxRetries=2;
+	// see isTransientLLMError for the full classification.
+	ChunkRetries int
+
+	// AllowPartial is the escape hatch for the atomic-failure
+	// default. When false (the default), ANY chunk that fails
+	// after retries aborts the whole review: ReviewMR returns
+	// *ChunkFailureError before posting any summary note or
+	// inline discussion. Operators running on 50-file MRs who
+	// would rather have a half-complete review than a hard
+	// failure can set this true and to the legacy behaviour:
+	// log a WARN, substitute an empty ReviewResponse, and
+	// continue with the chunks that did succeed.
+	//
+	// See issue #31 for the rationale.
+	AllowPartial bool
 }
 
 // CommentMode selects which kinds of comments mreview posts.
@@ -169,22 +195,41 @@ func ParseCommentMode(s string) (CommentMode, error) {
 }
 
 // validateConfig centralises the NewReviewer invariants so the
-// constructor stays small.
-func validateConfig(cfg Config) error {
+// constructor stays small. It also populates defaults so callers
+// can rely on zero-value behaviour without separate setup:
+//
+//   - Logger: slog.Default() when nil
+//   - ChunkRetries: 1 when zero (atomic-failure flow needs a retry
+//     budget; the historical "no retries" was effectively one attempt)
+//
+// AllowPartial defaults to false (atomic-failure is the safe
+// default; operators opt out explicitly).
+//
+// Returns the populated Config so the caller can store the
+// defaulted values rather than the zero values they passed in.
+// Passed by value because we want to mutate the local copy and
+// return it; the caller's struct stays untouched.
+func validateConfig(cfg Config) (Config, error) {
 	if cfg.GitLab == nil {
-		return errors.New("reviewer: Config.GitLab is required")
+		return cfg, errors.New("reviewer: Config.GitLab is required")
 	}
 	if cfg.LLM == nil {
-		return errors.New("reviewer: Config.LLM is required")
+		return cfg, errors.New("reviewer: Config.LLM is required")
 	}
 	if strings.TrimSpace(cfg.Model) == "" {
-		return errors.New("reviewer: Config.Model is required")
+		return cfg, errors.New("reviewer: Config.Model is required")
 	}
 	if cfg.MaxDiffBytes <= 0 {
-		return fmt.Errorf("reviewer: Config.MaxDiffBytes must be > 0, got %d", cfg.MaxDiffBytes)
+		return cfg, fmt.Errorf("reviewer: Config.MaxDiffBytes must be > 0, got %d", cfg.MaxDiffBytes)
+	}
+	if cfg.ChunkRetries < 0 {
+		return cfg, fmt.Errorf("reviewer: Config.ChunkRetries must be >= 0, got %d", cfg.ChunkRetries)
+	}
+	if cfg.ChunkRetries == 0 {
+		cfg.ChunkRetries = 1
 	}
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
 	}
-	return nil
+	return cfg, nil
 }

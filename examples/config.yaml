@@ -68,6 +68,20 @@ review:
   # treated as a duplicate candidate (more conservative).
   bot_username_env: GITLAB_BOT_USERNAME
 
+  # Chunk-level retry budget for transient LLM errors (per-call
+  # timeouts). When 0 the reviewer default (1 retry = 2 total
+  # attempts per chunk) applies. Negative is rejected.
+  chunk_retries: 1
+
+  # When false (default), ANY chunk that fails after retries
+  # aborts the whole review — no summary note, no inline
+  # discussion, and the CLI exits non-zero. Half a review is worse
+  # than no review: the operator re-runs rather than trusting a
+  # half-completed report. Set true to opt into the old
+  # "log + substitute empty response" behaviour, useful on big MRs
+  # where one bad chunk isn't worth aborting the whole run.
+  allow_partial: false
+
 server:
   # HTTP listen address for `mreview serve`.
   addr: ":8080"

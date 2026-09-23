@@ -54,6 +54,21 @@ type ReviewCmd struct {
 	// Per-call timeout.
 	PerChunkTimeout time.Duration `default:"120s" name:"per-chunk-timeout" env:"MREVIEW_PER_CHUNK_TIMEOUT" help:"Per-LLM-call timeout."`
 
+	// ChunkRetries is the chunk-level retry budget for transient
+	// errors (currently: per-call timeout). Default 1 (one retry,
+	// two total attempts). Setting this to 0 disables the
+	// chunk-level retry — the openai-go client's own MaxRetries=2
+	// still catches 5xx / 429 at the transport level.
+	ChunkRetries int `default:"1" name:"chunk-retries" env:"MREVIEW_CHUNK_RETRIES" help:"Chunk-level retry budget for transient errors (timeouts). Default 1."`
+
+	// AllowPartial restores the legacy "log + substitute empty
+	// response" behaviour when a chunk fails. The default after
+	// issue #31 is atomic failure: any chunk failure aborts the
+	// review with a *ChunkFailureError before posting anything
+	// to GitLab. Operators running on large MRs who prefer the
+	// half-completed-review behaviour can set this true.
+	AllowPartial bool `name:"allow-partial" env:"MREVIEW_ALLOW_PARTIAL" help:"On chunk failure, log a warn and continue with empty findings instead of aborting the whole review."`
+
 	// Dry-run.
 	DryRun bool `name:"dry-run" help:"Log the intended LLM and GitLab calls without performing them."`
 
@@ -146,6 +161,8 @@ func runReview(stdout io.Writer, c *ReviewCmd, cfg *config.File, logger *slog.Lo
 		MaxTokens:          c.MaxTokens,
 		ReasoningEffort:    llm.ReasoningEffort(c.ReasoningEffort),
 		PerChunkTimeout:    c.PerChunkTimeout,
+		ChunkRetries:       c.ChunkRetries,
+		AllowPartial:       c.AllowPartial,
 		Logger:             logger,
 		DryRun:             c.DryRun,
 		BotUsername:        c.BotUsername,
@@ -184,6 +201,16 @@ func runReview(stdout io.Writer, c *ReviewCmd, cfg *config.File, logger *slog.Lo
 			// operator should either raise --max-diff-bytes or
 			// split the MR.
 			return logWithError(logger, ExitConfig, "diff too large to chunk", err)
+		}
+		var cfe *reviewer.ChunkFailureError
+		if errors.As(err, &cfe) {
+			// Atomic-failure from issue #31: a chunk failed
+			// after retries and AllowPartial is false. No
+			// summary or inline findings have been posted; the
+			// operator should re-run. Use ExitInternal (7) —
+			// this is a new failure mode that the operator
+			// must intervene on.
+			return logWithError(logger, ExitInternal, "review incomplete", err)
 		}
 		return logWithError(logger, ExitInternal, "review failed", err)
 	}

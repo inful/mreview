@@ -208,6 +208,12 @@ func applyConfigToEnv(cfg *config.File) func() {
 	if v := cfg.Review.PerChunkTimeout; v != "" {
 		set("MREVIEW_PER_CHUNK_TIMEOUT", v)
 	}
+	if v := cfg.Review.ChunkRetries; v > 0 {
+		set("MREVIEW_CHUNK_RETRIES", intToStr(v))
+	}
+	if v := cfg.Review.AllowPartial; v {
+		set("MREVIEW_ALLOW_PARTIAL", "true")
+	}
 	if v := cfg.Server.Addr; v != "" {
 		set("MREVIEW_ADDR", v)
 	}

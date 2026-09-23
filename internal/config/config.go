@@ -74,6 +74,17 @@ type ReviewConfig struct {
 	Temperature     float64 `yaml:"temperature"`
 	MaxTokens       int     `yaml:"max_tokens"`
 	BotUsernameEnv  string  `yaml:"bot_username_env"`
+
+	// ChunkRetries is the chunk-level retry budget for transient
+	// LLM errors (per-call timeouts). When 0 the reviewer's
+	// default (1) applies. Negative is rejected at the flag-
+	// parsing layer by the CLI; here we just pass it through.
+	ChunkRetries int `yaml:"chunk_retries,omitempty"`
+
+	// AllowPartial restores the legacy "log + substitute empty"
+	// behaviour when a chunk fails. Default false (atomic
+	// failure — see issue #31).
+	AllowPartial bool `yaml:"allow_partial,omitempty"`
 }
 
 // ServerConfig holds `mreview serve` settings.

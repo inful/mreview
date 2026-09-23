@@ -23,7 +23,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/inful/mreview/internal/gitlab"
 	"github.com/inful/mreview/internal/llm"
@@ -42,9 +44,10 @@ type Reviewer struct {
 	action string
 }
 
-// NewReviewer validates cfg and returns a Reviewer.
+// NewReviewer validates cfg, applies defaults, and returns a Reviewer.
 func NewReviewer(cfg Config) (*Reviewer, error) {
-	if err := validateConfig(cfg); err != nil {
+	cfg, err := validateConfig(cfg)
+	if err != nil {
 		return nil, err
 	}
 	return &Reviewer{cfg: cfg}, nil
@@ -114,27 +117,43 @@ func (r *Reviewer) ReviewMR(ctx context.Context, project string, iid int, action
 	// root-cause write-up.
 	chunkResponses := make([]llm.ReviewResponse, 0, len(chunks))
 	var priorFindings []llm.Finding
+	allChunksSucceeded := true
 	for idx, chunkBatch := range batchChunks(chunks, r.cfg.MaxBatchBytes) {
+		batchNum := idx + 1
 		logger.Info("reviewing chunk batch",
-			"batch", idx+1,
+			"batch", batchNum,
 			"chunks", len(chunkBatch),
 			"prior_findings", len(priorFindings),
 		)
 
-		resp, err := r.reviewChunks(ctx, mr, chunkBatch, priorFindings)
+		resp, attempts, err := r.reviewChunksWithRetries(ctx, mr, chunkBatch, priorFindings, batchNum, logger)
 		if err != nil {
-			// A single failed chunk doesn't fail the whole review —
-			// we log and substitute an empty response so the summary
-			// note still gets posted (it'll explain the gap). The
-			// log carries the batch index + bounded file list so
-			// operators can identify which chunk was dropped without
-			// re-reading every prompt.
+			if !r.cfg.AllowPartial {
+				// Atomic failure (issue #31): no summary, no inline
+				// findings. The CLI surfaces the ChunkFailureError
+				// as a non-zero exit so the operator knows the
+				// review didn't complete — half a review is worse
+				// than no review.
+				return nil, &ChunkFailureError{
+					Batch:    batchNum,
+					Files:    chunkFileListAll(chunkBatch),
+					Attempts: attempts,
+					Cause:    err,
+				}
+			}
+			// Legacy behaviour (issue #14's visibility fix):
+			// log a WARN, substitute an empty response so the
+			// summary note still gets posted (it'll explain the
+			// gap). The log carries the batch index + bounded file
+			// list so operators can identify which chunk was
+			// dropped without re-reading every prompt.
 			logger.Warn("chunk review failed",
-				"batch", idx+1,
+				"batch", batchNum,
 				"files", chunkFileList(chunkBatch),
 				"err", err.Error(),
 			)
 			chunkResponses = append(chunkResponses, llm.ReviewResponse{})
+			allChunksSucceeded = false
 			continue
 		}
 		chunkResponses = append(chunkResponses, resp)
@@ -149,7 +168,7 @@ func (r *Reviewer) ReviewMR(ctx context.Context, project string, iid int, action
 	// Merge: if multiple chunk responses, ask the LLM to
 	// consolidate the per-chunk summaries. If just one, use it
 	// directly.
-	final, err := r.consolidate(ctx, mr, chunkResponses)
+	final, err := r.consolidate(ctx, mr, chunkResponses, allChunksSucceeded)
 	if err != nil {
 		return nil, fmt.Errorf("reviewer: consolidate: %w", err)
 	}
@@ -313,10 +332,14 @@ func (r *Reviewer) reviewChunks(ctx context.Context, mr *gitlab.MergeRequest, ch
 // verdict. Single-chunk case returns the chunk response directly;
 // multi-chunk case asks the LLM to merge the summaries.
 //
-// When the merge call fails or the merged response drops findings,
-// consolidate falls back to mergedFallback so the user always gets
-// a usable result.
-func (r *Reviewer) consolidate(ctx context.Context, mr *gitlab.MergeRequest, chunks []llm.ReviewResponse) (llm.ReviewResponse, error) {
+// allChunksSucceeded gates the "fallback concatenation" path used
+// when the merge LLM call or its parse fails. Under the atomic
+// default (AllowPartial=false) allChunksSucceeded is always true
+// here — any chunk failure has already aborted ReviewMR. Under
+// AllowPartial=true, chunks may have silently failed (substituted
+// empty); in that case the fallback would silently publish a
+// half-broken review and the merge step is gated to refuse instead.
+func (r *Reviewer) consolidate(ctx context.Context, mr *gitlab.MergeRequest, chunks []llm.ReviewResponse, allChunksSucceeded bool) (llm.ReviewResponse, error) {
 	if len(chunks) == 0 {
 		return llm.ReviewResponse{}, errors.New("reviewer: no chunk responses to consolidate")
 	}
@@ -354,6 +377,12 @@ func (r *Reviewer) consolidate(ctx context.Context, mr *gitlab.MergeRequest, chu
 		Timeout:         r.cfg.PerChunkTimeout,
 	})
 	if err != nil {
+		// Issue #31: when any chunk already failed, refuse to
+		// fall back to raw concatenation. Two failure modes
+		// stacked together shouldn't silently publish.
+		if !allChunksSucceeded {
+			return llm.ReviewResponse{}, fmt.Errorf("reviewer: merge call failed after chunk failure: %w", err)
+		}
 		// Fallback: concatenate per-chunk summaries so the user
 		// gets findings even if the merge call fails.
 		r.cfg.Logger.Warn("merge call failed; using raw concatenation",
@@ -369,6 +398,9 @@ func (r *Reviewer) consolidate(ctx context.Context, mr *gitlab.MergeRequest, chu
 
 	parsed, err := llm.ParseReviewResponse(resp.Content)
 	if err != nil {
+		if !allChunksSucceeded {
+			return llm.ReviewResponse{}, fmt.Errorf("reviewer: merge parse failed after chunk failure: %w", err)
+		}
 		return mergedFallback(allFindings, summaries.String()), nil
 	}
 	// If the merge dropped findings, restore them. Conservative:
@@ -387,4 +419,84 @@ func mergedFallback(findings []llm.Finding, summaries string) llm.ReviewResponse
 		Findings: findings,
 		Summary:  strings.TrimSpace(summaries),
 	}
+}
+
+// reviewChunksWithRetries is the per-batch wrapper that adds the
+// chunk-level retry budget (issue #17) on top of reviewChunks. It
+// calls reviewChunks up to 1+ChunkRetries times and:
+//
+//   - returns immediately on success;
+//   - retries with backoff on transient errors
+//     (isTransientLLMError);
+//   - returns immediately on non-transient errors (no retry —
+//     parse failures and context.Canceled propagate);
+//   - returns the LAST error and the total attempt count when
+//     retries are exhausted.
+//
+// attempt is 1-indexed in logs so operators see "attempt 1 of 2",
+// "attempt 2 of 2", matching what the issue text asks for.
+func (r *Reviewer) reviewChunksWithRetries(
+	ctx context.Context,
+	mr *gitlab.MergeRequest,
+	chunks []llm.Chunk,
+	priorFindings []llm.Finding,
+	batchNum int,
+	logger *slog.Logger,
+) (llm.ReviewResponse, int, error) {
+	maxAttempts := 1 + r.cfg.ChunkRetries
+	var lastErr error
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		resp, err := r.reviewChunks(ctx, mr, chunks, priorFindings)
+		if err == nil {
+			if attempt > 1 {
+				logger.Info("chunk recovered after retry",
+					"batch", batchNum,
+					"attempts", attempt,
+				)
+			}
+			return resp, attempt, nil
+		}
+		lastErr = err
+		// Non-transient: propagate without retry. Parse failures
+		// // and context.Canceled fall in this bucket.
+		if !isTransientLLMError(err) {
+			return llm.ReviewResponse{}, attempt, err
+		}
+		// Out of budget: stop.
+		if attempt == maxAttempts {
+			logger.Warn("chunk review failed; retries exhausted",
+				"batch", batchNum,
+				"attempts", attempt,
+				"err", err.Error(),
+			)
+			break
+		}
+		// Log at Debug per issue #17 — only the final exhaustion
+		// is Warn.
+		logger.Debug("chunk retry on transient error",
+			"batch", batchNum,
+			"attempt", attempt,
+			"next_attempt", attempt+1,
+			"err", err.Error(),
+		)
+		// Respect ctx cancellation: bail out of the sleep loop
+		// when the operator presses Ctrl-C.
+		select {
+		case <-ctx.Done():
+			return llm.ReviewResponse{}, attempt, ctx.Err()
+		case <-time.After(chunkBackoff(attempt - 1)):
+		}
+	}
+	return llm.ReviewResponse{}, maxAttempts, lastErr
+}
+
+// chunkFileListAll returns the file paths in a batch without the
+// "(N more)" cap — used by ChunkFailureError so the operator sees
+// every file that was in the failed batch, not a truncated list.
+func chunkFileListAll(chunks []llm.Chunk) []string {
+	out := make([]string, 0, len(chunks))
+	for _, c := range chunks {
+		out = append(out, c.File)
+	}
+	return out
 }

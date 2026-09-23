@@ -440,6 +440,10 @@ func TestReviewMR_MultiChunk_MergesVerdict(t *testing.T) {
 }
 
 func TestReviewMR_LLMParseFailure_ContinuesWithEmptySummary(t *testing.T) {
+	// This pins the LEGACY "log + substitute empty" behaviour path,
+	// which is opt-in via AllowPartial=true (the default after
+	// issue #31 is atomic failure on any chunk error). See
+	// TestReviewMR_LLMParseFailure_Atomic for that path.
 	g := newFakeGitLab(t)
 	g.enqueue(http.StatusOK, mrFixture)
 	g.enqueue(http.StatusOK, changesFixture)
@@ -454,11 +458,12 @@ func TestReviewMR_LLMParseFailure_ContinuesWithEmptySummary(t *testing.T) {
 	p, _ := llm.NewOpenAIProvider(llm.OpenAIConfig{BaseURL: l.URL, APIKey: "k", Model: "m"})
 	r, _ := NewReviewer(Config{
 		GitLab: glt, LLM: p, Model: "m", MaxDiffBytes: 4096,
-		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),
+		AllowPartial: true, // ← opt into legacy path
 	})
 	result, err := r.ReviewMR(context.Background(), "group/project", 42)
 	if err != nil {
-		t.Fatalf("parse failure should not fail the whole review: %v", err)
+		t.Fatalf("parse failure should not fail the whole review under AllowPartial: %v", err)
 	}
 	if len(result.Findings) != 0 {
 		t.Errorf("expected 0 findings, got %d", len(result.Findings))
@@ -466,6 +471,34 @@ func TestReviewMR_LLMParseFailure_ContinuesWithEmptySummary(t *testing.T) {
 	// Summary still posted (with "no findings" note).
 	if result.Summary == nil {
 		t.Error("summary should still be posted even when LLM parse fails")
+	}
+}
+
+// TestReviewMR_LLMParseFailure_Atomic pins the new behaviour from
+// issue #31: a parse failure aborts the review rather than
+// silently producing an empty-summary report.
+func TestReviewMR_LLMParseFailure_Atomic(t *testing.T) {
+	g := newFakeGitLab(t)
+	g.enqueue(http.StatusOK, mrFixture)
+	g.enqueue(http.StatusOK, changesFixture)
+
+	// LLM returns prose with no recoverable JSON.
+	l := newFakeLLM(t,
+		`The model wrote only prose with no JSON anywhere to be found.`,
+	)
+	glt, _ := gitlab.NewClient(g.URL, "test-token", gitlab.RetryConfig{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	p, _ := llm.NewOpenAIProvider(llm.OpenAIConfig{BaseURL: l.URL, APIKey: "k", Model: "m"})
+	r, _ := NewReviewer(Config{
+		GitLab: glt, LLM: p, Model: "m", MaxDiffBytes: 4096,
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	_, err := r.ReviewMR(context.Background(), "group/project", 42)
+	if err == nil {
+		t.Fatal("expected parse failure to abort the review (atomic), got nil error")
+	}
+	var cfe *ChunkFailureError
+	if !errors.As(err, &cfe) {
+		t.Errorf("expected *ChunkFailureError, got %T: %v", err, err)
 	}
 }
 
@@ -1098,66 +1131,6 @@ const twoFilesFixture = `[
 	{"old_path":"a.go","new_path":"a.go","new_file":false,"deleted_file":false,"renamed_file":false,"diff":"@@ -1 +1 @@\n-old\n+new\n"},
 	{"old_path":"b.go","new_path":"b.go","new_file":false,"deleted_file":false,"renamed_file":false,"diff":"@@ -1 +1 @@\n-foo\n+bar\n"}
 ]`
-
-// TestReviewMR_ChunkFailure_LogsBatchAndFiles confirms that when
-// one chunk's LLM call fails, the warn log line carries enough
-// context for an operator to identify which file was dropped
-// (batch index + file list) without re-reading the prompts.
-//
-// The failure is simulated by giving fakeLLM one body when two
-// chunks will be reviewed; the second chat call hits the stub's
-// "no body queued" 500, propagates back through reviewChunks, and
-// triggers the warn path.
-func TestReviewMR_ChunkFailure_LogsBatchAndFiles(t *testing.T) {
-	g := newFakeGitLab(t)
-	g.enqueue(http.StatusOK, mrFixture)
-	g.enqueue(http.StatusOK, twoFilesFixture) // 2 files → 2 chunks → 2 LLM calls
-	g.enqueue(http.StatusOK, "[]")            // ListDiscussions
-	g.enqueue(http.StatusCreated, `{"id":1,"body":"summary"}`)
-
-	// First chunk succeeds; second chunk fails (no body queued).
-	l := newFakeLLM(t,
-		`{"findings":[{"file":"a.go","line":1,"severity":"info","category":"style","body":"x"}],"summary":"ok"}`,
-	)
-
-	var logBuf bytes.Buffer
-	logger := slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
-
-	glt, _ := gitlab.NewClient(g.URL, "test-token", gitlab.RetryConfig{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	p, _ := llm.NewOpenAIProvider(llm.OpenAIConfig{BaseURL: l.URL, APIKey: "k", Model: "m"})
-	r, err := NewReviewer(Config{
-		GitLab: glt, LLM: p, Model: "m", MaxDiffBytes: 4096,
-		Logger: logger,
-	})
-	if err != nil {
-		t.Fatalf("NewReviewer: %v", err)
-	}
-
-	if _, err := r.ReviewMR(context.Background(), "group/project", 42); err != nil {
-		t.Fatalf("ReviewMR: %v", err)
-	}
-
-	logs := logBuf.String()
-	if !strings.Contains(logs, "level=WARN") {
-		t.Fatalf("expected a WARN log line, got:\n%s", logs)
-	}
-	if !strings.Contains(logs, "chunk review failed") {
-		t.Fatalf("expected the chunk-review-failed message, got:\n%s", logs)
-	}
-	// Batch index: second chunk fails, so batch=2.
-	if !strings.Contains(logs, "batch=2") {
-		t.Errorf("expected batch=2 in warn log (second chunk failed), got:\n%s", logs)
-	}
-	// File path of the failed chunk. The first chunk succeeded
-	// so the only file referenced in the warn log should be b.go.
-	if !strings.Contains(logs, "files=b.go") {
-		t.Errorf("expected files=b.go in warn log (second chunk's file), got:\n%s", logs)
-	}
-	// The successful chunk's file must NOT appear in the failure log.
-	if strings.Contains(logs, "files=a.go") {
-		t.Errorf("warn log should not carry the successful chunk's file, got:\n%s", logs)
-	}
-}
 
 // silence unused-import warning for json in case future tests
 // use it.

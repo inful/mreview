@@ -188,6 +188,12 @@ Flags:
       --max-batch-bytes=INT                       Byte budget for packing multiple chunks into one
                                                   LLM call. 0 (default) = one chunk per call.
       --per-chunk-timeout=2m0s                    Per-LLM-call timeout.
+      --chunk-retries=1                           Chunk-level retry budget for transient errors
+                                                   (timeouts). Default 1 (one retry, two total
+                                                   attempts per chunk).
+      --allow-partial                             On chunk failure, log a warn and continue with
+                                                   empty findings instead of aborting the whole
+                                                   review (atomic failure is the default).
       --bot-username=STRING                       Bot username for dedupe ($GITLAB_BOT_USERNAME).
       --retries=3                                 GitLab API retry attempts on transient errors.
       --retry-backoff=500ms                       Initial retry backoff; exponential with jitter.
@@ -331,8 +337,14 @@ The bot posts **nothing** when:
 - Every finding is deduped against the bot's prior comments — no
   new comments to post. The summary also stays silent in this case
   (see the `update`-skip behavior).
-- Every chunk's LLM call fails (transient errors exhaust the
-  retry budget). The worker logs the failure; nothing posts.
+- Any chunk's LLM call fails after the retry budget is exhausted.
+  By default (`--allow-partial=false`) the whole review aborts
+  with exit code 7 — no summary note, no inline discussion. The
+  log carries the batch index, file list, and underlying error;
+  operators re-run rather than trusting a half-completed report.
+  Pass `--allow-partial=true` to restore the legacy "log a warn
+  and substitute empty findings" path, useful on big MRs where
+  one bad chunk isn't worth aborting.
 
 Operators running with `--dry-run` see every post *attempted* in
 the logs (with body and URL) without anything actually landing on
@@ -349,7 +361,7 @@ hit a real MR.
 | `4`  | Not found (MR, project, model)                   |
 | `5`  | Conflict (line anchor out of range, stale MR head) |
 | `6`  | Transient failure exhausted (5xx / 429 retries)  |
-| `7`  | Unexpected internal error                        |
+| `7`  | Unexpected internal error, or atomic chunk failure (see issue #31) |
 
 CI scripts can branch on these. `mreview review` and `mreview serve`
 follow the same table; `mreview doctor` uses 0 / 1 (it always runs to
@@ -538,6 +550,8 @@ suffix only for guidance — keep the schema as is.
 | `--temperature`               | `MREVIEW_TEMPERATURE`         | `0.2`                            |
 | `--max-tokens`                | `MREVIEW_MAX_TOKENS`          | `2048`                           |
 | `--per-chunk-timeout`         | `MREVIEW_PER_CHUNK_TIMEOUT`   | `120s`                           |
+| `--chunk-retries`             | `MREVIEW_CHUNK_RETRIES`       | `1`                              |
+| `--allow-partial`             | `MREVIEW_ALLOW_PARTIAL`       | (unset)                          |
 | `--queue-size` (serve)        | `MREVIEW_QUEUE_SIZE`          | `32`                             |
 | `--addr` (serve)              | `MREVIEW_ADDR`                | `:8080`                          |
 | `--shutdown-timeout` (serve)  | `MREVIEW_SHUTDOWN_TIMEOUT`    | `30s`                            |
