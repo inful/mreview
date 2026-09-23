@@ -1,10 +1,14 @@
 # syntax=docker/dockerfile:1.7
 #
 # Debug image for mreview. Same binary layout as the production
-# image, but built on gcr.io/distroless/static:debug-nonroot which
-# ships busybox. Useful for `docker exec -it <container> /busybox/sh`
-# debugging and CI jobs that want ls/cat/env available alongside
-# the binary.
+# image, but built on gcr.io/distroless/cc:debug-nonroot which
+# ships busybox + glibc + libgcc. Useful for `docker exec -it
+# <container> /busybox/sh` debugging and CI jobs that want
+# ls/cat/env available alongside the binary.
+#
+# We use `cc:debug-nonroot` rather than `static:debug-nonroot`
+# for the same reason as the production Dockerfile: tokensave
+# is dynamically linked against glibc + libgcc.
 #
 # Multi-arch notes: see Dockerfile. The debug base image is also a
 # manifest list, so buildx pulls the right arch variant.
@@ -15,6 +19,14 @@
 # tokensave's older `mcp --project-root` shape is no longer used.
 
 # Stage 1: download + verify + unpack the pinned tokensave release.
+#
+# We do NOT execute the binary here: tokensave is dynamically
+# linked against glibc, and Alpine ships musl. The kernel
+# reports 'not found' when the ELF interpreter
+# (ld-linux-{x86_64,aarch64}.so.1) is absent. The distroless
+# debug runtime image uses glibc, so the binary runs there.
+# SHA256 verification + successful extraction is the build-
+# stage proof; the CI smoke job exercises the actual exec.
 #
 # Alpine's busybox ships wget but not curl; we install curl
 # explicitly because the GitHub API download needs
@@ -38,11 +50,11 @@ RUN apk add --no-cache curl \
         "https://github.com/aovestdipaperino/tokensave/releases/download/v${TOKENSAVE_VERSION}/tokensave-v${TOKENSAVE_VERSION}-${ASSET}-linux.tar.gz"; \
     echo "${SHA}  /tmp/tokensave.tar.gz" | sha256sum -c -; \
     tar -xzf /tmp/tokensave.tar.gz -C /out; \
-    install -m 0755 /out/tokensave /out/tokensave; \
-    /out/tokensave --version
+    chmod 0755 /out/tokensave; \
+    test -x /out/tokensave
 
-# Stage 2: distroless debug runtime (busybox shell available).
-FROM gcr.io/distroless/static:debug-nonroot AS runtime
+# Stage 2: distroless debug runtime (busybox shell + glibc + libgcc).
+FROM gcr.io/distroless/cc:debug-nonroot AS runtime
 
 ARG TARGETPLATFORM
 COPY --chown=65532:65532 ${TARGETPLATFORM}/mreview /mreview

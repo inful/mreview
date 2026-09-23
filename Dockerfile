@@ -13,13 +13,20 @@
 #     buildx resolves it at build time per architecture.
 #   - $TARGETARCH is the per-arch identifier (amd64 / arm64) used to
 #     pick the matching tokensave release asset.
-#   - The base image (gcr.io/distroless/static:nonroot) is a manifest
+#   - The base image (gcr.io/distroless/base:nonroot) is a manifest
 #     list, so buildx pulls the right arch variant automatically.
 #
 # Runtime base:
-#   - gcr.io/distroless/static:nonroot ships ca-certificates
-#     (required for TLS to GitLab SaaS / self-hosted GitLab / Ollama
-#     behind TLS) and nothing else. Runs as uid 65532 by default.
+#   - gcr.io/distroless/cc:nonroot is debian-slim + glibc + libgcc
+#     + ca-certs + openssl. We use `cc` (not `static`, not `base`)
+#     because tokensave is a Rust binary dynamically linked against
+#     glibc and libgcc_s (the GCC unwinder / atomic runtime).
+#     `static` strips even the dynamic linker; `base` includes
+#     glibc but not libgcc. mreview itself is statically linked
+#     (CGO_ENABLED=0) so the image-size jump from `static` (~2 MB)
+#     to `cc` (~30 MB) buys us glibc + libgcc + the tokensave
+#     binary (~24 MB), not a re-bundling of mreview's own libs.
+#     Runs as uid 65532 by default.
 #
 # ─── Tokensave bundle ────────────────────────────────────────────
 # tokensave is the language-agnostic code-graph tool mreview's
@@ -49,6 +56,14 @@
 # explicitly because the GitHub API download needs
 # `-fsSL` semantics (fail on HTTP error, follow redirects,
 # silent). Busybox wget has no fail-on-error flag.
+#
+# We do NOT execute the binary here: tokensave is dynamically
+# linked against glibc, and Alpine ships musl. The kernel
+# reports 'not found' when the ELF interpreter
+# (ld-linux-{x86_64,aarch64}.so.1) is absent. The distroless
+# runtime image uses glibc, so the binary runs there. SHA256
+# verification + successful extraction is the build-stage
+# proof; the CI smoke job exercises the actual exec.
 FROM alpine:3.20 AS tokensave
 ARG TARGETARCH
 ARG TOKENSAVE_VERSION=7.12.1
@@ -67,13 +82,13 @@ RUN apk add --no-cache curl \
         "https://github.com/aovestdipaperino/tokensave/releases/download/v${TOKENSAVE_VERSION}/tokensave-v${TOKENSAVE_VERSION}-${ASSET}-linux.tar.gz"; \
     echo "${SHA}  /tmp/tokensave.tar.gz" | sha256sum -c -; \
     tar -xzf /tmp/tokensave.tar.gz -C /out; \
-    install -m 0755 /out/tokensave /out/tokensave; \
-    /out/tokensave --version
+    chmod 0755 /out/tokensave; \
+    test -x /out/tokensave
 
-# Stage 2: distroless runtime. Carries only the per-arch mreview
-# binary GoReleaser dropped in the build context + the verified
-# tokensave binary from stage 1.
-FROM gcr.io/distroless/static:nonroot AS runtime
+# Stage 2: distroless runtime (cc variant — glibc + libgcc).
+# Carries the per-arch mreview binary GoReleaser dropped in the
+# build context + the verified tokensave binary from stage 1.
+FROM gcr.io/distroless/cc:nonroot AS runtime
 
 ARG TARGETPLATFORM
 COPY --chown=65532:65532 ${TARGETPLATFORM}/mreview /mreview
