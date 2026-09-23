@@ -437,6 +437,21 @@ func (r *Reviewer) reviewChunks(ctx context.Context, mr *gitlab.MergeRequest, ch
 		return llm.ReviewResponse{}, err
 	}
 
+	// Diagnostic: log the LLM prompt and raw response when
+	// --verbose is set. Helps confirm whether the LLM is
+	// actually receiving the diff content (or whether the
+	// chunker is producing empty/garbage chunks), and whether
+	// the response is `findings: []` (model behaviour) or a
+	// parse failure.
+	r.cfg.Logger.Debug("llm prompt",
+		"model", r.cfg.Model,
+		"chunks", len(chunks),
+		"system_len", len(system),
+		"user_len", len(user),
+		"system", system,
+		"user", user,
+	)
+
 	resp, err := r.cfg.LLM.Chat(ctx, llm.ChatRequest{
 		System:          system,
 		User:            user,
@@ -450,6 +465,11 @@ func (r *Reviewer) reviewChunks(ctx context.Context, mr *gitlab.MergeRequest, ch
 	if err != nil {
 		return llm.ReviewResponse{}, fmt.Errorf("llm: %w", err)
 	}
+
+	r.cfg.Logger.Debug("llm raw response",
+		"model", r.cfg.Model,
+		"raw", resp.Content,
+	)
 
 	parsed, err := llm.ParseReviewResponse(resp.Content)
 	if err != nil {
@@ -489,6 +509,14 @@ func (r *Reviewer) consolidate(ctx context.Context, mr *gitlab.MergeRequest, chu
 		mr.IID, mr.Title, summaries.String(), len(allFindings), formatFindings(allFindings),
 	)
 
+	r.cfg.Logger.Debug("llm merge prompt",
+		"model", r.cfg.Model,
+		"system_len", len(system),
+		"user_len", len(user),
+		"system", system,
+		"user", user,
+	)
+
 	resp, err := r.cfg.LLM.Chat(ctx, llm.ChatRequest{
 		System:          system,
 		User:            user,
@@ -510,6 +538,11 @@ func (r *Reviewer) consolidate(ctx context.Context, mr *gitlab.MergeRequest, chu
 			Summary:  strings.TrimSpace(summaries.String()),
 		}, nil
 	}
+
+	r.cfg.Logger.Debug("llm merge raw response",
+		"model", r.cfg.Model,
+		"raw", resp.Content,
+	)
 
 	parsed, err := llm.ParseReviewResponse(resp.Content)
 	if err != nil {
