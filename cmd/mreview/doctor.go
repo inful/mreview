@@ -212,6 +212,3 @@ func doctorConfig(c *DoctorCmd) doctorResult {
 		c.MaxDiffBytes, c.PerChunkTimeout, c.Model)
 	return r
 }
-
-// contains was a tiny string-slice membership helper. Replaced
-// by slices.Contains (Go 1.21+) and removed.
