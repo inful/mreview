@@ -89,7 +89,12 @@ type ReviewCmd struct {
 // runReview is invoked by run() after CLI parsing matches the
 // "review" subcommand. It wires up the GitLab + LLM clients and
 // delegates to internal/reviewer.
-func runReview(stdout io.Writer, c *ReviewCmd, cfg *config.File, logger *slog.Logger) error {
+//
+// parentCtx is the ctx from main.go's signal.NotifyContext —
+// it's cancelled on SIGINT/SIGTERM, which propagates through
+// the LLM HTTP client and the GitLab client so an in-flight
+// review aborts promptly when the user hits ^C.
+func runReview(parentCtx context.Context, stdout io.Writer, c *ReviewCmd, cfg *config.File, logger *slog.Logger) error {
 	logger.Info("starting review",
 		"repo", c.Repo,
 		"mr", c.MR,
@@ -158,7 +163,7 @@ func runReview(stdout io.Writer, c *ReviewCmd, cfg *config.File, logger *slog.Lo
 		return logWithError(logger, ExitConfig, "build reviewer", err)
 	}
 
-	result, err := rev.ReviewMR(revContext(c), c.Repo, c.MR)
+	result, err := rev.ReviewMR(parentCtx, c.Repo, c.MR)
 	if err != nil {
 		// Map gitlab.Error.Kind → typed ExitError.
 		var ge *gitlab.Error
@@ -198,15 +203,6 @@ func runReview(stdout io.Writer, c *ReviewCmd, cfg *config.File, logger *slog.Lo
 		_, _ = fmt.Fprintln(stdout, result.MR.WebURL)
 	}
 	return nil
-}
-
-// revContext returns a context with timeout derived from c, or
-// the background context when no timeout is configured. Currently
-// the review command has no global timeout flag — PerChunkTimeout
-// applies per LLM call — but this helper exists so a future
-// --timeout flag can plug in cleanly.
-func revContext(c *ReviewCmd) context.Context { //nolint:unused // reserved for future --timeout flag
-	return context.Background()
 }
 
 // logWithError logs at error level and returns a typed *ExitError

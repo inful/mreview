@@ -120,7 +120,7 @@ func run(parentCtx context.Context, args []string, stdout, stderr io.Writer) (ex
 
 	switch ctx.Command() {
 	case "review":
-		return exitCodeFromError(runReview(stdout, cli.Review, cfg, logger))
+		return exitCodeFromError(runReview(parentCtx, stdout, cli.Review, cfg, logger))
 	case "serve":
 		return exitCodeFromError(runServe(parentCtx, stdout, cli.Serve, cfg, logger))
 	case "doctor":
