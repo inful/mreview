@@ -13,6 +13,7 @@ import (
 	"github.com/sausheong/harness/tools/file"
 	"github.com/sausheong/harness/tools/mcp"
 
+	"github.com/inful/mreview/internal/ci/artifact"
 	"github.com/inful/mreview/internal/gitlab"
 	"github.com/inful/mreview/internal/policy"
 	"github.com/inful/mreview/internal/provider"
@@ -57,6 +58,11 @@ type clientDeps struct {
 	// path to the binary; empty means PATH-resolved.
 	TokensaveEnabled bool
 	TokensaveBin     string
+
+	// Artifacts carries the CI artifact set (PR #5) the
+	// orchestrator threads into the prompt. Nil = no
+	// artifacts configured.
+	Artifacts *artifact.Set
 
 	Logger *slog.Logger
 }
@@ -106,6 +112,7 @@ func buildReviewer(ctx context.Context, deps clientDeps) (*reviewer.Orchestrator
 		Policy:      deps.Policy,
 		BotUsername: deps.BotUsername,
 		DryRun:      deps.DryRun,
+		Artifacts:   deps.Artifacts,
 		Logger:      deps.Logger,
 	})
 	if err != nil {

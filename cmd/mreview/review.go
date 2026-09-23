@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/inful/mreview/internal/ci/artifact"
 	"github.com/inful/mreview/internal/config"
 	"github.com/inful/mreview/internal/event"
 	"github.com/inful/mreview/internal/gitlab"
@@ -81,6 +82,20 @@ type ReviewCmd struct {
 	TokensaveEnabled bool   `default:"true" name:"tokensave-enabled" env:"MREVIEW_TOKENSAVE_ENABLED" help:"Enable the tokensave MCP server (the agent's primary code-graph tool). Default true."`
 	TokensaveBin     string `name:"tokensave-bin" env:"MREVIEW_TOKENSAVE_BIN" help:"Path to the tokensave binary (default: PATH-resolved 'tokensave'). Used when --tokensave-enabled is true."`
 
+	// ArtifactsDir points at the directory the central CI
+	// pipeline populated before mreview ran. The orchestrator
+	// reads build.log, test_results.json, lint.json, and
+	// vulns.json from this directory and injects them into the
+	// harness prompt as pre-loaded context. Per-artifact
+	// failures (missing / empty / malformed) are degraded
+	// information, not errors — the agent sees explicit
+	// "NOT AVAILABLE" markers. Empty = no artifacts (the
+	// prompt still renders an all-NOT-AVAILABLE block).
+	//
+	// The directory itself being unreachable IS an error
+	// (caller exits with ExitConfig).
+	ArtifactsDir string `default:".mreview-artifacts" name:"artifacts-dir" env:"MREVIEW_ARTIFACTS_DIR" type:"path" help:"Directory containing CI artifacts (build.log, test_results.json, lint.json, vulns.json). Default .mreview-artifacts."`
+
 	// Verbose is intentionally NOT declared here — it lives on
 	// the parent CLI struct so it's accepted globally.
 }
@@ -151,6 +166,40 @@ func runReview(parentCtx context.Context, stdout io.Writer, c *ReviewCmd, cfg *c
 		)
 	}
 
+	// CI artifact load (issue #43 / #42 step 5). The
+	// orchestrator threads the set into the harness prompt.
+	// Missing / empty / unreadable artifacts are degraded
+	// information, not errors — the prompt surfaces an
+	// explicit "NOT AVAILABLE" marker. The directory itself
+	// being unreachable is treated leniently: a debug log +
+	// no artifacts (the prompt still renders the
+	// all-NOT-AVAILABLE block). CI operators will see the
+	// debug line if they typo the path.
+	var artifactSet *artifact.Set
+	if c.ArtifactsDir != "" {
+		set, err := artifact.LoadAll(c.ArtifactsDir, artifact.Source{
+			BuildPath: "build.log",
+			TestsPath: "test_results.json",
+			LintPath:  "lint.json",
+			VulnsPath: "vulns.json",
+		})
+		if err != nil {
+			logger.Debug("artifacts dir not available; proceeding without",
+				"dir", c.ArtifactsDir,
+				"err", err.Error(),
+			)
+		} else {
+			artifactSet = &set
+			logger.Info("artifacts loaded",
+				"dir", c.ArtifactsDir,
+				"build", statusLabel(set.Build),
+				"tests", statusLabel(set.Tests),
+				"lint", statusLabel(set.Lint),
+				"vulns", statusLabel(set.Vulns),
+			)
+		}
+	}
+
 	logger.Info("starting review",
 		"repo", c.Repo,
 		"mr", c.MR,
@@ -175,6 +224,7 @@ func runReview(parentCtx context.Context, stdout io.Writer, c *ReviewCmd, cfg *c
 		RetryBackoff:     c.RetryBackoff,
 		TokensaveEnabled: c.TokensaveEnabled,
 		TokensaveBin:     c.TokensaveBin,
+		Artifacts:        artifactSet,
 		Logger:           logger,
 	})
 	if err != nil {
@@ -235,4 +285,18 @@ func errStr(err error) string {
 		return ""
 	}
 	return strings.TrimSpace(err.Error())
+}
+
+// statusLabel turns a LoadResult into a one-line log label:
+// "present", "malformed", or "missing". Keeps the artifact
+// log line readable.
+func statusLabel[T any](r artifact.LoadResult[T]) string {
+	switch {
+	case r.Value != nil:
+		return "present"
+	case r.ParseError != nil:
+		return "malformed"
+	default:
+		return "missing"
+	}
 }
