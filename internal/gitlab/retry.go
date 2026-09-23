@@ -36,6 +36,14 @@ type RetryConfig struct {
 // when RetryConfig.RetryAfterCap is zero.
 const retryAfterCapDefault = 60 * time.Second
 
+// DefaultMaxBackoff is the default ceiling for the exponential-backoff
+// wait between retry attempts when RetryConfig.MaxBackoff is zero.
+//
+// Callers that want a different ceiling should pass it through
+// RetryConfig explicitly; the constant exists so the cmd layer and the
+// retry helper agree on the same fallback value.
+const DefaultMaxBackoff = 30 * time.Second
+
 // doWithRetry runs fn, retrying on transient errors. The function
 // receives the current attempt number (1-indexed) so it can decorate
 // logs with "first try", "retry 2/3", etc.
@@ -50,7 +58,7 @@ func doWithRetry(ctx context.Context, cfg RetryConfig, op string, fn func(ctx co
 		cfg.MaxAttempts = 1
 	}
 	if cfg.MaxBackoff == 0 {
-		cfg.MaxBackoff = 30 * time.Second
+		cfg.MaxBackoff = DefaultMaxBackoff
 	}
 	if cfg.RetryAfterCap == 0 {
 		cfg.RetryAfterCap = retryAfterCapDefault
