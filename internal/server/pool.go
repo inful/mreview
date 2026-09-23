@@ -159,20 +159,7 @@ func (p *Pool) wait(timeout time.Duration) {
 	}()
 	select {
 	case <-done:
-	case <-timeAfter(timeout):
+	case <-time.After(timeout):
 		p.logger.Warn("pool shutdown timeout exceeded; abandoning in-flight jobs")
 	}
-}
-
-// timeAfter is a tiny indirection so we can keep time-related
-// imports tidy. Returns a channel that fires after d.
-func timeAfter(d time.Duration) <-chan struct{} {
-	ch := make(chan struct{})
-	go func() {
-		defer close(ch)
-		t := time.NewTimer(d)
-		defer t.Stop()
-		<-t.C
-	}()
-	return ch
 }

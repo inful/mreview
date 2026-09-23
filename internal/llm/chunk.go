@@ -196,7 +196,7 @@ func splitDiffAtHunks(diff string, maxBytes int) []string {
 		// hunk, then continue from after it.
 		if hunkSize > maxBytes {
 			if currentSize > 0 {
-				parts = append(parts, joinLines(current))
+				parts = append(parts, strings.Join(current, "\n"))
 				current = nil
 				currentSize = 0
 			}
@@ -206,7 +206,7 @@ func splitDiffAtHunks(diff string, maxBytes int) []string {
 
 		// Would adding this hunk overflow? Flush current.
 		if currentSize+hunkSize > maxBytes && len(current) > 0 {
-			parts = append(parts, joinLines(current))
+			parts = append(parts, strings.Join(current, "\n"))
 			current = nil
 			currentSize = 0
 		}
@@ -214,7 +214,7 @@ func splitDiffAtHunks(diff string, maxBytes int) []string {
 		currentSize += hunkSize
 	}
 	if len(current) > 0 {
-		parts = append(parts, joinLines(current))
+		parts = append(parts, strings.Join(current, "\n"))
 	}
 	return parts
 }
@@ -258,12 +258,6 @@ func hunkRanges(lines []string) []hunkRange {
 		ranges = append(ranges, hunkRange{start: start, end: end})
 	}
 	return ranges
-}
-
-// joinLines joins lines with newlines and trims a single trailing
-// newline (matching the original diff's newline handling).
-func joinLines(lines []string) string {
-	return strings.Join(lines, "\n")
 }
 
 // lineSplit splits lines into chunks each ≤ maxBytes, breaking at

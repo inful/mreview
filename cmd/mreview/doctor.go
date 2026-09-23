@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"slices"
 	"strings"
 	"time"
 
@@ -190,7 +191,7 @@ func doctorLLM(c *DoctorCmd, logger *slog.Logger) doctorResult {
 	}
 	r.ok = true
 	r.summary = fmt.Sprintf("%s available (of %d)", c.Model, len(models))
-	if contains(models, c.Model) {
+	if slices.Contains(models, c.Model) {
 		r.detail = fmt.Sprintf("URL: %s\n  Model present\n  Models: %s", c.LLMURL, modelList)
 	} else {
 		// Model NOT in the list — still ok=true (we connected),
@@ -212,12 +213,5 @@ func doctorConfig(c *DoctorCmd) doctorResult {
 	return r
 }
 
-// contains is a tiny string-slice membership helper.
-func contains(haystack []string, needle string) bool {
-	for _, s := range haystack {
-		if s == needle {
-			return true
-		}
-	}
-	return false
-}
+// contains was a tiny string-slice membership helper. Replaced
+// by slices.Contains (Go 1.21+) and removed.
