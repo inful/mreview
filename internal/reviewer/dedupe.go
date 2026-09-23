@@ -8,7 +8,7 @@ import (
 	"strings"
 
 	"github.com/inful/mreview/internal/gitlab"
-	"github.com/inful/mreview/internal/llm"
+	"github.com/inful/mreview/internal/policy"
 )
 
 // fingerprintSet is the deduplication set built from prior
@@ -90,7 +90,7 @@ func fingerprintFromBody(body string) string {
 // Contains reports whether the given finding's fingerprint is in
 // the set. A finding matches when its body normalizes to the same
 // hash as a prior bot comment.
-func (f *fingerprintSet) Contains(finding llm.Finding) bool {
+func (f *fingerprintSet) Contains(finding Finding) bool {
 	if f == nil {
 		return false
 	}
@@ -117,17 +117,26 @@ func (f *fingerprintSet) String() string {
 
 // dedupeAgainstSet drops findings whose body fingerprint already
 // exists in the bot's prior comments. Returns the surviving
-// findings.
-func dedupeAgainstSet(in []llm.Finding, fpSet *fingerprintSet, logger *slog.Logger) []llm.Finding {
-	out := make([]llm.Finding, 0, len(in))
+// findings (converted back to Finding — the orchestrator works
+// in the local Finding type after this step).
+func dedupeAgainstSet(in []policy.EnforcedFinding, fpSet *fingerprintSet, logger *slog.Logger) []Finding {
+	out := make([]Finding, 0, len(in))
 	for _, f := range in {
-		if fpSet.Contains(f) {
+		local := Finding{
+			File:       f.File,
+			Line:       f.Line,
+			Severity:   Severity(f.Verdict),
+			Category:   f.Category,
+			Body:       f.Body,
+			Suggestion: "",
+		}
+		if fpSet.Contains(local) {
 			logger.Debug("dedupe: skip finding (already posted)",
 				"file", f.File, "line", f.Line,
 			)
 			continue
 		}
-		out = append(out, f)
+		out = append(out, local)
 	}
 	return out
 }

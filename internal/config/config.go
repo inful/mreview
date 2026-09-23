@@ -29,22 +29,26 @@ import (
 // subcommand doesn't use are ignored; e.g. `mreview review` reads
 // GitLab/LLM/Review but ignores Server.
 type File struct {
-	GitLab GitLabConfig `yaml:"gitlab"`
-	LLM    LLMConfig    `yaml:"llm"`
-	Review ReviewConfig `yaml:"review"`
-	Server ServerConfig `yaml:"server"`
-	Retry  RetryConfig  `yaml:"retry"`
+	GitLab   GitLabConfig   `yaml:"gitlab"`
+	Provider ProviderConfig `yaml:"provider"`
+	Review   ReviewConfig   `yaml:"review"`
+	Retry    RetryConfig    `yaml:"retry"`
 
 	// LLMPresets is an optional map of model-name → preset. The
 	// cmd layer uses ApplyPreset(model) to derive a packing
 	// budget and per-chunk timeout when the operator hasn't
 	// supplied explicit CLI/env values.
+	//
+	// Deprecated by the architecture reset (#42): the harness
+	// library now owns the provider matrix and prompt-cache
+	// discipline. PR #3 drops this in favour of harness's own
+	// preset layer. Kept for now to avoid breaking operator
+	// configs during the transition.
 	LLMPresets map[string]LLMPreset `yaml:"llm_presets,omitempty"`
 
-	// LLMPresetByModel is an optional map of LLM model identifier
-	// → preset name. When `--model` matches an entry, the named
-	// preset from LLMPresets is applied. Strict lookup only — no
-	// prefix matching, no heuristics.
+	// LLMPresetByModel is an optional map of LLM model
+	// identifier → preset name. Deprecated alongside
+	// LLMPresets; see #42.
 	LLMPresetByModel map[string]string `yaml:"llm_preset_by_model,omitempty"`
 }
 
@@ -60,52 +64,43 @@ type GitLabConfig struct {
 	TokenEnv string `yaml:"token_env"`
 }
 
-// LLMConfig holds OpenAI-compatible LLM connection settings.
-type LLMConfig struct {
-	BaseURL   string `yaml:"base_url"`
-	APIKeyEnv string `yaml:"api_key_env"`
-	Model     string `yaml:"model"`
+// ProviderConfig holds provider connection settings for the
+// harness library. After the architecture reset (#42), the
+// harness library owns the provider matrix; mreview only
+// forwards a base URL (for litellm / local proxies) and the
+// model name. Per-provider env-var conventions are read
+// directly by harness's provider constructors.
+type ProviderConfig struct {
+	BaseURL string `yaml:"base_url"`
+	Model   string `yaml:"model"`
 }
 
-// ReviewConfig holds review-pipeline settings.
+// ReviewConfig holds review-pipeline settings that survive
+// the architecture reset (#42). The LLM-specific fields
+// (MaxDiffBytes, PerChunkTimeout, Temperature, MaxTokens,
+// ChunkRetries, AllowPartial) are gone — the harness library
+// owns the LLM loop and its tuning lives in harness's own
+// configuration.
+//
+// Only BotUsernameEnv remains; the orchestrator reads it
+// for the dedupe fingerprint filter (see internal/reviewer).
 type ReviewConfig struct {
-	MaxDiffBytes    int     `yaml:"max_diff_bytes"`
-	PerChunkTimeout string  `yaml:"per_chunk_timeout"` // duration string ("120s"); parsed by caller
-	Temperature     float64 `yaml:"temperature"`
-	MaxTokens       int     `yaml:"max_tokens"`
-	BotUsernameEnv  string  `yaml:"bot_username_env"`
-
-	// ChunkRetries is the chunk-level retry budget for transient
-	// LLM errors (per-call timeouts). When 0 the reviewer's
-	// default (1) applies. Negative is rejected at the flag-
-	// parsing layer by the CLI; here we just pass it through.
-	ChunkRetries int `yaml:"chunk_retries,omitempty"`
-
-	// AllowPartial restores the legacy "log + substitute empty"
-	// behaviour when a chunk fails. Default false (atomic
-	// failure — see issue #31).
-	AllowPartial bool `yaml:"allow_partial,omitempty"`
+	BotUsernameEnv string `yaml:"bot_username_env,omitempty"`
 }
 
-// ServerConfig holds `mreview serve` settings.
+// ServerConfig used to hold `mreview serve` settings. The
+// architecture reset (#42) drops the serve mode; the type
+// is kept as a stub so old YAML config files referencing
+// `server:` don't fail the strict YAML parse. The fields are
+// unused. Remove in a future release.
+//
+// Deprecated.
 type ServerConfig struct {
 	Addr             string `yaml:"addr"`
 	WebhookSecretEnv string `yaml:"webhook_secret_env"`
 	QueueSize        int    `yaml:"queue_size"`
 	ShutdownTimeout  string `yaml:"shutdown_timeout"`
-
-	// Workers is the steady-state concurrency cap for the worker
-	// pool — the number of simultaneous reviews `mreview serve`
-	// will run. Distinct from QueueSize, which is the burst
-	// buffer (how many webhook deliveries can wait when the pool
-	// is fully busy). Zero or negative means use the default (4).
-	//
-	// Operators on memory-constrained LLM servers (single Ollama
-	// on a Pi, CPU-only llama.cpp on shared hardware) can drop
-	// this; operators sharing an LLM with other tenants tighten
-	// it to leave headroom; operators with a fat LLM (vLLM with
-	// batching, multi-GPU inference) raise it above 4.
-	Workers int `yaml:"workers,omitempty"`
+	Workers          int    `yaml:"workers,omitempty"`
 }
 
 // RetryConfig holds GitLab API retry policy. Applies to every
@@ -127,42 +122,15 @@ func (f *File) Defaults() {
 	if f.GitLab.TokenEnv == "" {
 		f.GitLab.TokenEnv = "GITLAB_TOKEN"
 	}
-	if f.LLM.BaseURL == "" {
-		f.LLM.BaseURL = "http://localhost:11434/v1"
+	if f.Provider.BaseURL == "" {
+		f.Provider.BaseURL = "http://localhost:11434/v1"
 	}
-	if f.LLM.Model == "" {
-		f.LLM.Model = "qwen2.5-coder:7b"
-	}
-	if f.Review.MaxDiffBytes == 0 {
-		f.Review.MaxDiffBytes = 200000
-	}
-	if f.Review.PerChunkTimeout == "" {
-		f.Review.PerChunkTimeout = "120s"
-	}
-	if f.Review.Temperature == 0 {
-		f.Review.Temperature = 0.2
-	}
-	if f.Review.MaxTokens == 0 {
-		f.Review.MaxTokens = 2048
+	if f.Provider.Model == "" {
+		f.Provider.Model = "qwen2.5-coder:7b"
 	}
 	if f.Review.BotUsernameEnv == "" {
 		f.Review.BotUsernameEnv = "GITLAB_BOT_USERNAME"
 	}
-	if f.Server.Addr == "" {
-		f.Server.Addr = ":8080"
-	}
-	if f.Server.WebhookSecretEnv == "" {
-		f.Server.WebhookSecretEnv = "GITLAB_WEBHOOK_SECRET"
-	}
-	if f.Server.QueueSize == 0 {
-		f.Server.QueueSize = 32
-	}
-	if f.Server.ShutdownTimeout == "" {
-		f.Server.ShutdownTimeout = "30s"
-	}
-	// Workers: zero means "use the cmd-layer default" (currently
-	// 4 in server.New). Don't override 0 — let the cmd layer's
-	// "<= 0 → 4" rule apply so the default lives in one place.
 	if f.Retry.MaxAttempts == 0 {
 		f.Retry.MaxAttempts = 4
 	}
@@ -185,20 +153,8 @@ func (f *File) Validate() error {
 	if f.GitLab.TokenEnv == "" {
 		missing = append(missing, "gitlab.token_env")
 	}
-	if f.LLM.BaseURL == "" {
-		missing = append(missing, "llm.base_url")
-	}
-	if f.LLM.Model == "" {
-		missing = append(missing, "llm.model")
-	}
 	if len(missing) > 0 {
 		return fmt.Errorf("config: missing required fields: %s", strings.Join(missing, ", "))
-	}
-	if f.Review.MaxDiffBytes < 0 {
-		return fmt.Errorf("config: review.max_diff_bytes must be > 0, got %d", f.Review.MaxDiffBytes)
-	}
-	if f.Server.QueueSize < 1 {
-		return fmt.Errorf("config: server.queue_size must be > 0, got %d", f.Server.QueueSize)
 	}
 	return nil
 }

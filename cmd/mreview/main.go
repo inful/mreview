@@ -121,11 +121,9 @@ func run(parentCtx context.Context, args []string, stdout, stderr io.Writer) (ex
 
 	switch ctx.Command() {
 	case "review":
-		return exitCodeFromError(runReview(stdout, cli.Review, cfg, logger))
-	case "serve":
-		return exitCodeFromError(runServe(parentCtx, stdout, cli.Serve, cfg, logger))
+		return exitCodeFromError(runReview(parentCtx, stdout, cli.Review, cfg, logger))
 	case "doctor":
-		return exitCodeFromError(runDoctor(stdout, cli.Doctor, logger))
+		return exitCodeFromError(runDoctor(parentCtx, stdout, cli.Doctor, logger))
 	default:
 		logger.Error("no subcommand matched", "command", ctx.Command())
 		return ExitConfig
@@ -188,71 +186,14 @@ func applyConfigToEnv(cfg *config.File) func() {
 			return os.Getenv(c.GitLab.TokenEnv)
 		}},
 
-		// LLM connection.
-		{"LLM_URL", func(c *config.File) string { return c.LLM.BaseURL }},
-		{"LLM_MODEL", func(c *config.File) string { return c.LLM.Model }},
-		{"LLM_API_KEY", func(c *config.File) string {
-			if c.LLM.APIKeyEnv == "" {
-				return ""
-			}
-			return os.Getenv(c.LLM.APIKeyEnv)
-		}},
+		// Provider connection (after #42, the harness library
+		// owns the provider matrix; mreview only forwards the
+		// base URL + model name).
+		{"MREVIEW_PROVIDER_BASE_URL", func(c *config.File) string { return c.Provider.BaseURL }},
+		{"MREVIEW_MODEL", func(c *config.File) string { return c.Provider.Model }},
 
 		// Review tunables.
 		{"GITLAB_BOT_USERNAME", func(c *config.File) string { return c.Review.BotUsernameEnv }},
-		{"MREVIEW_MAX_DIFF_BYTES", func(c *config.File) string {
-			if c.Review.MaxDiffBytes == 0 {
-				return ""
-			}
-			return strconv.Itoa(c.Review.MaxDiffBytes)
-		}},
-		{"MREVIEW_TEMPERATURE", func(c *config.File) string {
-			if c.Review.Temperature == 0 {
-				return ""
-			}
-			return strconv.FormatFloat(c.Review.Temperature, 'g', -1, 64)
-		}},
-		{"MREVIEW_MAX_TOKENS", func(c *config.File) string {
-			if c.Review.MaxTokens == 0 {
-				return ""
-			}
-			return strconv.Itoa(c.Review.MaxTokens)
-		}},
-		{"MREVIEW_PER_CHUNK_TIMEOUT", func(c *config.File) string { return c.Review.PerChunkTimeout }},
-		{"MREVIEW_CHUNK_RETRIES", func(c *config.File) string {
-			if c.Review.ChunkRetries == 0 {
-				return ""
-			}
-			return strconv.Itoa(c.Review.ChunkRetries)
-		}},
-		{"MREVIEW_ALLOW_PARTIAL", func(c *config.File) string {
-			if !c.Review.AllowPartial {
-				return ""
-			}
-			return "true"
-		}},
-
-		// Server.
-		{"GITLAB_WEBHOOK_SECRET", func(c *config.File) string {
-			if c.Server.WebhookSecretEnv == "" {
-				return ""
-			}
-			return os.Getenv(c.Server.WebhookSecretEnv)
-		}},
-		{"MREVIEW_ADDR", func(c *config.File) string { return c.Server.Addr }},
-		{"MREVIEW_QUEUE_SIZE", func(c *config.File) string {
-			if c.Server.QueueSize == 0 {
-				return ""
-			}
-			return strconv.Itoa(c.Server.QueueSize)
-		}},
-		{"MREVIEW_WORKERS", func(c *config.File) string {
-			if c.Server.Workers == 0 {
-				return ""
-			}
-			return strconv.Itoa(c.Server.Workers)
-		}},
-		{"MREVIEW_SHUTDOWN_TIMEOUT", func(c *config.File) string { return c.Server.ShutdownTimeout }},
 
 		// Retry.
 		{"MREVIEW_RETRIES", func(c *config.File) string {
