@@ -51,6 +51,25 @@ type PromptOptions struct {
 	// (e.g. "this PR is a WIP, focus on architecture not naming").
 	// Empty means no extra context.
 	UserPromptSuffix string
+
+	// PriorFindings lists findings produced by earlier batches
+	// in the same MR (batches reviewed before this one). When
+	// non-empty, the user prompt gets a "Findings from previous
+	// batches" section prepended so the chunk LLM has ground
+	// truth about the file scope and types already seen.
+	//
+	// Why: when a batch contains only, say, .md files and
+	// produces zero findings, the model reviewing a later
+	// batch of .go files has no signal that Go files exist in
+	// the MR — its inputs only contain its own slice of the
+	// diff. Without this section the model may hallucinate
+	// claims like "the MR contains no Go code" during the
+	// merge step because nothing in the per-batch summaries
+	// or final findings references Go files either.
+	//
+	// Empty on the first batch. Defaults to nil/empty on
+	// single-batch MRs (no behaviour change).
+	PriorFindings []Finding
 }
 
 // defaultCategories is the vocabulary embedded in the system
@@ -95,7 +114,7 @@ func BuildReviewPrompt(meta ReviewMetadata, chunks []Chunk, opts PromptOptions) 
 	}
 
 	system = buildSystemPrompt(cats, opts.SystemPromptSuffix)
-	user = buildUserPrompt(meta, chunks, opts.IncludeMRDescription, opts.UserPromptSuffix)
+	user = buildUserPrompt(meta, chunks, opts.IncludeMRDescription, opts.UserPromptSuffix, opts.PriorFindings)
 	return system, user, nil
 }
 
@@ -133,8 +152,14 @@ func buildSystemPrompt(categories []Category, suffix string) string {
 	b.WriteString("- severity \"error\" = blocker (do not merge). \"warning\" = must fix before merge. \"info\" = nit or suggestion.\n")
 	b.WriteString("- Be terse. One finding per real issue. Skip trivial style nits unless they obscure a real bug.\n")
 	b.WriteString("- Every finding must reference a specific file:line from the diff and explain a real issue or observation.\n")
-	b.WriteString("- Do NOT emit an empty findings array on a substantive diff — empty outputs give the developer nothing actionable.\n")
-	b.WriteString("- If the diff is genuinely clean, emit one finding with severity \"info\" describing what you reviewed (e.g. \"Read the full diff: no issues found\").\n")
+	b.WriteString("\n")
+	b.WriteString("Findings vs. summary:\n")
+	b.WriteString("- The `findings` array is the primary output. Each concrete issue you identify MUST appear as a separate finding object with file, line, severity, category, and body.\n")
+	b.WriteString("- The `summary` is a SHORT narrative recap of the findings (2-4 sentences). It is NOT a substitute for findings.\n")
+	b.WriteString("- Every issue you mention in the summary MUST have a corresponding entry in the findings array with a specific file:line. If you cannot point at a file:line for an issue, drop it from the summary too.\n")
+	b.WriteString("- An empty findings array is ONLY valid when the diff is genuinely clean. In that case, emit summary as a single short sentence confirming cleanliness (e.g. \"LGTM, no issues found.\").\n")
+	b.WriteString("- A long summary that describes real issues alongside an empty findings array is a malformed response. Do not produce that.\n")
+	b.WriteString("\n")
 	b.WriteString("- Output the JSON object directly. Do NOT wrap it in ``` fences or preamble prose.\n")
 	if suffix = strings.TrimSpace(suffix); suffix != "" {
 		b.WriteString("\n# Team-specific guidance (operator-supplied)\n\n")
@@ -146,7 +171,7 @@ func buildSystemPrompt(categories []Category, suffix string) string {
 
 // buildUserPrompt composes the per-MR user message, optionally
 // followed by operator-supplied team context.
-func buildUserPrompt(meta ReviewMetadata, chunks []Chunk, includeDescription bool, suffix string) string {
+func buildUserPrompt(meta ReviewMetadata, chunks []Chunk, includeDescription bool, suffix string, priorFindings []Finding) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Merge request: !%d %q by %s (%s -> %s)\n\n",
 		meta.IID, meta.Title, meta.Author, meta.SourceBranch, meta.TargetBranch)
@@ -155,6 +180,14 @@ func buildUserPrompt(meta ReviewMetadata, chunks []Chunk, includeDescription boo
 		b.WriteString("Description:\n")
 		b.WriteString(strings.TrimSpace(meta.Description))
 		b.WriteString("\n\n")
+	}
+
+	if len(priorFindings) > 0 {
+		b.WriteString("Findings from previous batches (read these for context — do NOT duplicate or re-emit; only emit findings for files in THIS batch's 'Files changed' section below):\n\n")
+		for _, f := range priorFindings {
+			writeFinding(&b, f)
+		}
+		b.WriteString("\n")
 	}
 
 	b.WriteString("Files changed:\n\n")
@@ -205,4 +238,15 @@ func toStringSlice(cs []Category) []string {
 		out[i] = string(c)
 	}
 	return out
+}
+
+// writeFinding emits one prior-batch finding as a compact one-line
+// record for the "Findings from previous batches" section. Format
+// keeps the token cost low while preserving file/line/severity/
+// category/body — the four fields the chunk LLM needs to (a) avoid
+// re-emitting the same finding, and (b) reason about the file
+// scope and types the merge step will see.
+func writeFinding(b *strings.Builder, f Finding) {
+	fmt.Fprintf(b, "- %s:%d [%s/%s] %s\n",
+		f.File, f.Line, f.Severity, f.Category, strings.TrimSpace(f.Body))
 }

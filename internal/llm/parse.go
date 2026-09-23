@@ -43,6 +43,19 @@ func (e *ErrParseFailure) Unwrap() error { return e.Cause }
 //     forget the fence or emit a single line of JSON inside a
 //     paragraph of prose.
 //
+//  4. streaming partial extraction: when the response was
+//     truncated mid-stream (LLM hit MaxTokens, network cutoff,
+//     server overload — observed in production), the previous
+//     three strategies all fail because findMatching never sees
+//     the closing brace / quote and raw Unmarshal hits
+//     ErrUnexpectedEOF. Strategy 4 uses a streaming json.Decoder
+//     to walk the response and recover whatever COMPLETE
+//     findings the LLM emitted before the truncation point.
+//     Findings are returned even if the response ends mid-finding
+//     or mid-summary — partial findings are silently dropped (the
+//     decoder fails on them, so we move on), and we keep whatever
+//     summary prefix we managed to read.
+//
 // If a bare array of findings is recovered (some models emit only
 // the findings without the envelope), we wrap it into a
 // ReviewResponse with an empty summary. That's friendlier than
@@ -105,10 +118,74 @@ func ParseReviewResponse(raw string) (ReviewResponse, error) {
 		}
 	}
 
+	// 4. streaming partial extraction — recovery for truncated
+	// responses. Returns whatever complete findings the LLM
+	// emitted before the cut. Only used when strategies 1-3 fail;
+	// if the response was structurally complete, we wouldn't be
+	// here.
+	if findings, summary, ok := extractStreamingFindings(raw); ok && len(findings) > 0 {
+		return ReviewResponse{Findings: findings, Summary: summary}, nil
+	}
+
 	return ReviewResponse{}, &ErrParseFailure{
 		Raw:   raw,
-		Cause: errors.New("no JSON recovered via raw / fenced / loose extraction"),
+		Cause: errors.New(errNoRecovery(raw)),
 	}
+}
+
+// errNoRecovery returns a more diagnostic error message that
+// distinguishes "truncated mid-string" from "invalid JSON" so
+// operators reading parse-failure logs can immediately tell which
+// fix to apply (raise MaxTokens / batch size vs. file an LLM bug).
+//
+// Returns a static message when the truncation detection is
+// inconclusive.
+func errNoRecovery(raw string) string {
+	trimmed := strings.TrimRight(raw, " \t\r\n")
+	if trimmed == "" {
+		return "no JSON recovered via raw / fenced / loose extraction (empty after trim)"
+	}
+	if looksTruncated(trimmed) {
+		return fmt.Sprintf(
+			"no JSON recovered via raw / fenced / loose extraction (response appears truncated: len=%d, ends mid-string or mid-object — likely MaxTokens or network cutoff)",
+			len(raw),
+		)
+	}
+	return "no JSON recovered via raw / fenced / loose extraction (response is structurally unbalanced but does not look truncated — likely invalid JSON from LLM)"
+}
+
+// looksTruncated reports whether raw ends in a state that
+// strongly suggests the response was cut off mid-generation
+// rather than the LLM producing invalid JSON. Two signals count:
+//
+//  1. ends with an unterminated string (last char is not the
+//     closing quote of a complete JSON value), OR
+//  2. ends inside a structural delimiter — `,` or `:` with no
+//     following value, suggesting the LLM was about to emit
+//     more content.
+func looksTruncated(raw string) bool {
+	if raw == "" {
+		return false
+	}
+	// Strip trailing whitespace for the heuristic.
+	trimmed := strings.TrimRight(raw, " \t\r\n")
+	if trimmed == "" {
+		return false
+	}
+	last := trimmed[len(trimmed)-1]
+	// A response that ends with `}` or `]` is structurally
+	// complete at the outermost level (the LLM finished its
+	// output). If it's still unparseable, the JSON is invalid
+	// rather than truncated.
+	switch last {
+	case '}', ']':
+		return false
+	}
+	// Anything else: ends with `,`, `:`, `"`, alphanumeric, etc.
+	// — all signs of mid-stream cutoff. The balanced-brace
+	// strategies would have caught a complete outer object, so
+	// we're here because one didn't materialise.
+	return true
 }
 
 // tryUnmarshalEnvelope tries to unmarshal s as ReviewResponse and
@@ -238,6 +315,94 @@ func extractLoose(raw string) string {
 		return string(b[i : i+end+1])
 	}
 	return ""
+}
+
+// extractStreamingFindings uses a json.Decoder to walk the raw
+// response and extract whatever complete findings the LLM
+// emitted before any truncation. It returns the recovered
+// findings, the recovered summary (may be empty), and a flag
+// indicating whether the response was recognisably a
+// ReviewResponse envelope (had an opening `{` and a "findings"
+// or "summary" key).
+//
+// The streaming approach is robust to truncation because the
+// decoder consumes complete JSON values one at a time and
+// returns an error only when it hits invalid or missing data.
+// Findings that completed BEFORE the truncation point are
+// returned; the partially-written finding at the truncation
+// point fails to decode and is silently dropped.
+//
+// The decoder stops at the first decode error and returns. Any
+// unread trailing content (summary fragments, closing braces)
+// is dropped. This is deliberate: returning partial JSON that
+// the caller would then have to validate adds risk for
+// negligible value.
+//
+// Why this is its own strategy (and not a fallback on
+// strategies 1-3): if the response was structurally complete,
+// one of 1-3 would have unmarshalled it. We're here because
+// the response ends mid-string or mid-object — findMatching
+// never balances, raw Unmarshal hits ErrUnexpectedEOF, no
+// fence. The streaming decoder doesn't care about the outer
+// brace balance; it just walks the tokens until it hits
+// invalid data.
+func extractStreamingFindings(raw string) (findings []Finding, summary string, found bool) {
+	dec := json.NewDecoder(strings.NewReader(raw))
+
+	// Read opening brace.
+	tok, err := dec.Token()
+	if err != nil || tok != json.Delim('{') {
+		return nil, "", false
+	}
+
+	// Walk top-level keys.
+	for dec.More() {
+		keyTok, err := dec.Token()
+		if err != nil {
+			break
+		}
+		key, ok := keyTok.(string)
+		if !ok {
+			break
+		}
+
+		switch key {
+		case "findings":
+			found = true
+			// Consume the array opening '['.
+			tok, err := dec.Token()
+			if err != nil || tok != json.Delim('[') {
+				return findings, summary, found
+			}
+			// Stream findings until error or end of array.
+			for dec.More() {
+				var f Finding
+				if err := dec.Decode(&f); err != nil {
+					// Truncated mid-finding or invalid — stop.
+					// Whatever we already have is the result.
+					return findings, summary, found
+				}
+				findings = append(findings, f)
+			}
+			// Consume closing ']'.
+			_, _ = dec.Token()
+		case "summary":
+			tok, err := dec.Token()
+			if err != nil {
+				return findings, summary, found
+			}
+			if s, ok := tok.(string); ok {
+				summary = s
+			}
+		default:
+			// Skip unknown top-level key's value so the
+			// decoder doesn't choke on it.
+			if _, err := dec.Token(); err != nil {
+				return findings, summary, found
+			}
+		}
+	}
+	return findings, summary, found
 }
 
 // findMatching returns the index (relative to s) of the closing

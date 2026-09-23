@@ -189,6 +189,63 @@ func TestReviewMR_HappyPath(t *testing.T) {
 	}
 }
 
+// TestReviewMR_VerboseLogsPromptAndResponse confirms that --verbose
+// (which sets the logger to Debug level) actually produces the new
+// diagnostic Debug logs for the LLM prompt and raw response. This
+// is the path operators use to confirm whether the model is
+// receiving the chunks they expect and whether the response is
+// `{"findings":[], ...}` (model behaviour) or a parse failure.
+func TestReviewMR_VerboseLogsPromptAndResponse(t *testing.T) {
+	g := newFakeGitLab(t)
+	minimalHappyGitLab(g, mrFixture, changesFixture)
+
+	l := newFakeLLM(t,
+		`{"findings":[{"file":"a.go","line":1,"severity":"warning","category":"security","body":"x"}],"summary":"ok"}`,
+	)
+
+	var logBuf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	glt, _ := gitlab.NewClient(g.URL, "test-token", gitlab.RetryConfig{
+		MaxAttempts:    2,
+		InitialBackoff: 1 * time.Millisecond,
+		MaxBackoff:     5 * time.Millisecond,
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	p, _ := llm.NewOpenAIProvider(llm.OpenAIConfig{BaseURL: l.URL, APIKey: "k", Model: "m"})
+
+	r, err := NewReviewer(Config{
+		GitLab: glt, LLM: p, Model: "m", MaxDiffBytes: 4096,
+		Logger: logger,
+	})
+	if err != nil {
+		t.Fatalf("NewReviewer: %v", err)
+	}
+
+	if _, err := r.ReviewMR(context.Background(), "group/project", 42); err != nil {
+		t.Fatalf("ReviewMR: %v", err)
+	}
+
+	logs := logBuf.String()
+	for _, want := range []string{
+		`level=DEBUG msg="llm prompt"`,
+		`level=DEBUG msg="llm raw response"`,
+	} {
+		if !strings.Contains(logs, want) {
+			t.Errorf("expected Debug log %q; got:\n%s", want, logs)
+		}
+	}
+	// The prompt should contain the MR title (which the LLM sees).
+	if !strings.Contains(logs, "Add caching") {
+		t.Errorf("expected MR title in logged prompt; got:\n%s", logs)
+	}
+	// The response log should contain the LLM's actual output.
+	// slog's text formatter escapes inner quotes, so look for the
+	// surrounding JSON structure rather than literal quotes.
+	if !strings.Contains(logs, "findings") || !strings.Contains(logs, "summary") {
+		t.Errorf("expected findings/summary JSON in logged response; got:\n%s", logs)
+	}
+}
+
 func TestReviewMR_DryRun_NoPosts(t *testing.T) {
 	g := newFakeGitLab(t)
 	g.enqueue(http.StatusOK, mrFixture)
@@ -1201,6 +1258,101 @@ func TestReviewMR_ZeroFindings_NoWarnOnSmallDiff(t *testing.T) {
 // silence unused-import warning for json in case future tests
 // use it.
 var _ = json.Marshal
+
+// TestBuildMergePrompt_PreservesFindingSchema pins the merge
+// prompt's required field set. The bug observed in production:
+// the merge LLM renamed `body` → `message` in its output, which
+// caused filterFindings to drop every merged finding (empty body).
+// The schema is now inline in the merge prompt with all six
+// field names, plus an explicit "do NOT rename to 'message' or
+// 'description'" guard for `body`. If a future prompt edit removes
+// the schema or the rename guard, this test fails.
+func TestBuildMergePrompt_PreservesFindingSchema(t *testing.T) {
+	mr := &gitlab.MergeRequest{
+		IID:          13,
+		Title:        "MVP for pipeline issue manager",
+		SourceBranch: "develop",
+		TargetBranch: "main",
+		Author:       gitlab.User{Username: "inful"},
+		DiffRefs:     gitlab.DiffRefs{BaseSHA: "a", StartSHA: "b", HeadSHA: "c"},
+	}
+	chunks := []llm.ReviewResponse{
+		{
+			Findings: []llm.Finding{
+				{File: "a.go", Line: 1, Severity: llm.SeverityError, Category: llm.CategoryCorrectness, Body: "real bug"},
+			},
+			Summary: "Chunk 1 found a real bug.",
+		},
+		{
+			Findings: []llm.Finding{
+				{File: "b.go", Line: 2, Severity: llm.SeverityWarning, Category: llm.CategorySecurity, Body: "supply-chain"},
+			},
+			Summary: "Chunk 2 found a supply-chain concern.",
+		},
+	}
+	system, user := buildMergePrompt(mr, chunks)
+
+	// System prompt must include the full schema with every field
+	// the reviewer reads downstream (file, line, severity, category,
+	// body, suggestion, summary).
+	for _, want := range []string{
+		`"findings": [`,
+		`"file": "<path at HEAD>"`,
+		`"line": <1-indexed line number>`,
+		`"severity": "info" | "warning" | "error"`,
+		`"category":`,
+		`"body":`,
+		`"suggestion":`,
+		`"summary":`,
+	} {
+		if !strings.Contains(system, want) {
+			t.Errorf("merge system prompt missing required fragment %q", want)
+		}
+	}
+
+	// Explicit anti-rename guard: the production failure mode was
+	// the merge LLM using "message" or "description" instead of
+	// "body". The prompt must call this out explicitly.
+	for _, want := range []string{
+		"do NOT rename",
+		"'message'",
+		"'description'",
+		"silently dropped",
+	} {
+		if !strings.Contains(system, want) {
+			t.Errorf("merge prompt missing anti-rename guard: %q", want)
+		}
+	}
+
+	// "Reducer, not a generator" guard: the observed failure mode
+	// was the merge LLM synthesising new findings ("the MR contains
+	// no Go code") that weren't in the input list. The prompt must
+	// explicitly forbid adding new findings — only preserve,
+	// dedupe, or summarise the inputs.
+	for _, want := range []string{
+		"reducer, not a generator",
+		"do not synthesise new findings",
+		"Combined findings",
+	} {
+		if !strings.Contains(system, want) {
+			t.Errorf("merge prompt missing anti-synthesise guard: %q", want)
+		}
+	}
+
+	// The user prompt must carry both per-chunk summaries and
+	// the formatted findings so the merge LLM has full context.
+	for _, want := range []string{
+		"Chunk 1 summary",
+		"Chunk 2 summary",
+		"Combined findings (count=2)",
+		"a.go:1",
+		"b.go:2",
+	} {
+		if !strings.Contains(user, want) {
+			t.Errorf("merge user prompt missing required fragment %q", want)
+		}
+	}
+}
 
 // silence unused-import warning for json in case future tests
 // use it.

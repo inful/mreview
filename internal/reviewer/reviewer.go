@@ -300,11 +300,25 @@ func (r *Reviewer) ReviewMR(ctx context.Context, project string, iid int, action
 	// Run the LLM per chunk (or one merged call if there's only
 	// one chunk). Each call returns a ReviewResponse; we
 	// accumulate findings + summaries for the final merge.
+	//
+	// For multi-batch MRs, each batch's prompt carries the
+	// findings from previous batches as a "Findings from previous
+	// batches" section. This gives the chunk LLM ground truth
+	// about file scope/types already seen, so it (and the merge
+	// step downstream) cannot hallucinate claims like "the MR
+	// contains no Go code" when its own batch was, say, only
+	// markdown. See llm.PromptOptions.PriorFindings for the
+	// root-cause write-up.
 	chunkResponses := make([]llm.ReviewResponse, 0, len(chunks))
+	var priorFindings []llm.Finding
 	for idx, chunkBatch := range batchChunks(chunks, r.cfg.MaxBatchBytes) {
-		logger.Info("reviewing chunk batch", "batch", idx+1, "chunks", len(chunkBatch))
+		logger.Info("reviewing chunk batch",
+			"batch", idx+1,
+			"chunks", len(chunkBatch),
+			"prior_findings", len(priorFindings),
+		)
 
-		resp, err := r.reviewChunks(ctx, mr, chunkBatch)
+		resp, err := r.reviewChunks(ctx, mr, chunkBatch, priorFindings)
 		if err != nil {
 			// A single failed chunk doesn't fail the whole review —
 			// we log and substitute an empty response so the summary
@@ -321,6 +335,12 @@ func (r *Reviewer) ReviewMR(ctx context.Context, project string, iid int, action
 			continue
 		}
 		chunkResponses = append(chunkResponses, resp)
+		// Accumulate for the next batch's prompt. We deliberately
+		// do NOT dedupe here — the chunk LLM only needs enough
+		// context to know what files have been touched and what
+		// kinds of issues have been raised. Dedup happens against
+		// GitLab discussions after the merge step.
+		priorFindings = append(priorFindings, resp.Findings...)
 	}
 
 	// Merge: if multiple chunk responses, ask the LLM to
@@ -418,7 +438,14 @@ func (r *Reviewer) ReviewMR(ctx context.Context, project string, iid int, action
 // reviewChunks runs one LLM call against one batch of chunks and
 // returns the parsed ReviewResponse. Batches let the reviewer push
 // multiple small files into a single prompt when they all fit.
-func (r *Reviewer) reviewChunks(ctx context.Context, mr *gitlab.MergeRequest, chunks []llm.Chunk) (llm.ReviewResponse, error) {
+//
+// The priorFindings argument carries findings from earlier batches
+// in the same MR (batches 1..N-1 in the caller's loop). It is
+// threaded into the user prompt as a "Findings from previous
+// batches" section so the chunk LLM has ground truth about the
+// file scope already covered. Pass nil on the first batch (single-
+// batch MRs always pass nil).
+func (r *Reviewer) reviewChunks(ctx context.Context, mr *gitlab.MergeRequest, chunks []llm.Chunk, priorFindings []llm.Finding) (llm.ReviewResponse, error) {
 	meta := llm.ReviewMetadata{
 		IID:          mr.IID,
 		Title:        mr.Title,
@@ -432,10 +459,26 @@ func (r *Reviewer) reviewChunks(ctx context.Context, mr *gitlab.MergeRequest, ch
 		IncludeMRDescription: r.cfg.IncludeDescription,
 		SystemPromptSuffix:   r.cfg.SystemPromptSuffix,
 		UserPromptSuffix:     r.cfg.UserPromptSuffix,
+		PriorFindings:        priorFindings,
 	})
 	if err != nil {
 		return llm.ReviewResponse{}, err
 	}
+
+	// Diagnostic: log the LLM prompt and raw response when
+	// --verbose is set. Helps confirm whether the LLM is
+	// actually receiving the diff content (or whether the
+	// chunker is producing empty/garbage chunks), and whether
+	// the response is `findings: []` (model behaviour) or a
+	// parse failure.
+	r.cfg.Logger.Debug("llm prompt",
+		"model", r.cfg.Model,
+		"chunks", len(chunks),
+		"system_len", len(system),
+		"user_len", len(user),
+		"system", system,
+		"user", user,
+	)
 
 	resp, err := r.cfg.LLM.Chat(ctx, llm.ChatRequest{
 		System:          system,
@@ -450,6 +493,11 @@ func (r *Reviewer) reviewChunks(ctx context.Context, mr *gitlab.MergeRequest, ch
 	if err != nil {
 		return llm.ReviewResponse{}, fmt.Errorf("llm: %w", err)
 	}
+
+	r.cfg.Logger.Debug("llm raw response",
+		"model", r.cfg.Model,
+		"raw", resp.Content,
+	)
 
 	parsed, err := llm.ParseReviewResponse(resp.Content)
 	if err != nil {
@@ -478,15 +526,14 @@ func (r *Reviewer) consolidate(ctx context.Context, mr *gitlab.MergeRequest, chu
 		allFindings = append(allFindings, c.Findings...)
 	}
 
-	system := "You are merging per-chunk code review outputs into one verdict. " +
-		"Output ONLY a JSON object matching the ReviewResponse schema " +
-		"(findings array + summary string). " +
-		"Preserve every finding from the inputs — do not drop any. " +
-		"Write a single, consolidated summary paragraph."
+	system, user := buildMergePrompt(mr, chunks)
 
-	user := fmt.Sprintf(
-		"MR: !%d %q\n\nPer-chunk summaries:\n%s\n\nCombined findings (count=%d):\n%s\n\nEmit the merged JSON object.",
-		mr.IID, mr.Title, summaries.String(), len(allFindings), formatFindings(allFindings),
+	r.cfg.Logger.Debug("llm merge prompt",
+		"model", r.cfg.Model,
+		"system_len", len(system),
+		"user_len", len(user),
+		"system", system,
+		"user", user,
 	)
 
 	resp, err := r.cfg.LLM.Chat(ctx, llm.ChatRequest{
@@ -510,6 +557,11 @@ func (r *Reviewer) consolidate(ctx context.Context, mr *gitlab.MergeRequest, chu
 			Summary:  strings.TrimSpace(summaries.String()),
 		}, nil
 	}
+
+	r.cfg.Logger.Debug("llm merge raw response",
+		"model", r.cfg.Model,
+		"raw", resp.Content,
+	)
 
 	parsed, err := llm.ParseReviewResponse(resp.Content)
 	if err != nil {
@@ -684,6 +736,60 @@ func formatFindings(fs []llm.Finding) string {
 			i+1, f.File, f.Line, f.Severity, f.Category, f.Body)
 	}
 	return b.String()
+}
+
+// buildMergePrompt composes the (system, user) prompt pair that
+// asks the LLM to consolidate per-chunk ReviewResponses into one
+// final verdict. The schema is included inline (not just described)
+// because observed behavior: when the schema is implied, merge
+// LLMs occasionally rename "body" to "message" or "description",
+// and the downstream filterFindings() drops anything with an empty
+// Body. Pinning the field names explicitly makes the merge LLM
+// preserve them.
+//
+// Extracted as a helper so tests can assert the schema is present
+// without driving a full consolidate() call.
+func buildMergePrompt(mr *gitlab.MergeRequest, chunks []llm.ReviewResponse) (system, user string) {
+	var summaries strings.Builder
+	var allFindings []llm.Finding
+	for i, c := range chunks {
+		fmt.Fprintf(&summaries, "Chunk %d summary: %s\n", i+1, c.Summary)
+		allFindings = append(allFindings, c.Findings...)
+	}
+
+	system = "You are merging per-chunk code review outputs into one verdict. " +
+		"Output ONLY a JSON object matching the ReviewResponse schema below — " +
+		"every field name must match exactly so the result can be parsed:\n\n" +
+		"{\n" +
+		`  "findings": [` + "\n" +
+		"    {\n" +
+		`      "file": "<path at HEAD>",` + "\n" +
+		`      "line": <1-indexed line number>,` + "\n" +
+		`      "severity": "info" | "warning" | "error",` + "\n" +
+		`      "category": "<one of: security, correctness, style, perf, test, docs>",` + "\n" +
+		`      "body": "<one or two sentences of markdown — REQUIRED, do NOT rename to 'message' or 'description'>",` + "\n" +
+		`      "suggestion": "<optional code block; empty string if none>"` + "\n" +
+		"    }\n" +
+		"  ],\n" +
+		`  "summary": "<one consolidated paragraph>"` + "\n" +
+		"}\n\n" +
+		"Preserve every finding from the inputs — do not drop any. " +
+		"Every field above (file, line, severity, category, body, suggestion) " +
+		"must be carried through verbatim; renaming 'body' to 'message' will " +
+		"cause the finding to be silently dropped on the reviewer side.\n\n" +
+		"STRICT OUTPUT RULE: This is a reducer, not a generator. Emit ONLY " +
+		"findings that already appear in the 'Combined findings' list in the " +
+		"user message below — do not synthesise new findings based on your own " +
+		"assessment of the MR. If you cannot point a claim at a specific " +
+		"file:line from the input list, omit it. The observed failure mode " +
+		"otherwise is hallucinated claims (e.g. \"the MR contains no Go code\" " +
+		"when it clearly does) that the reviewer has no way to catch downstream."
+
+	user = fmt.Sprintf(
+		"MR: !%d %q\n\nPer-chunk summaries:\n%s\n\nCombined findings (count=%d):\n%s\n\nEmit the merged JSON object.",
+		mr.IID, mr.Title, summaries.String(), len(allFindings), formatFindings(allFindings),
+	)
+	return system, user
 }
 
 // dedupeFindings collapses findings that share (file, line, body).

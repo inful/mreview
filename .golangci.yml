@@ -43,6 +43,17 @@ linters:
         - name: package-comments
           disabled: true # package comments handled by linter; opt-out per file
 
+  # golangci-lint v2 schema moved global exclusions under
+  # linters.exclusions (a top-level `exclusions:` block is rejected
+  # by `golangci-lint config verify` with 'additional properties
+  # "exclusions" not allowed'). v2 also dropped the `default:`
+  # field — the global block now only accepts `rules`, `paths`,
+  # `presets`, and `warn-unused`.
+  # Kept intentionally empty: every exclusion we might want
+  # belongs next to the linter that needs it, not here.
+  exclusions:
+    rules: []
+
 formatters:
   enable:
     - gofmt
@@ -51,7 +62,3 @@ formatters:
     goimports:
       local-prefixes:
         - github.com/inful/mreview
-
-exclusions:
-  default: false
-  rules: []
