@@ -182,7 +182,12 @@ func TestRun_Review_HelpFlagShowsNewFlags(t *testing.T) {
 	if code != ExitOK {
 		t.Errorf("--help returned %d, want 0", code)
 	}
-	for _, want := range []string{"--on-drafts", "--on-push", "skip", "run"} {
+	for _, want := range []string{
+		// Per-event guard (PR #1).
+		"--on-drafts", "--on-push", "skip", "run",
+		// Tokensave MCP integration (PR #4).
+		"--tokensave-enabled", "--tokensave-bin",
+	} {
 		if !strings.Contains(stdout.String(), want) {
 			t.Errorf("--help output missing %q\n%s", want, stdout.String())
 		}
