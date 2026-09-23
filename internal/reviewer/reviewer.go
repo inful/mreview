@@ -748,7 +748,14 @@ func buildMergePrompt(mr *gitlab.MergeRequest, chunks []llm.ReviewResponse) (sys
 		"Preserve every finding from the inputs — do not drop any. " +
 		"Every field above (file, line, severity, category, body, suggestion) " +
 		"must be carried through verbatim; renaming 'body' to 'message' will " +
-		"cause the finding to be silently dropped on the reviewer side."
+		"cause the finding to be silently dropped on the reviewer side.\n\n" +
+		"STRICT OUTPUT RULE: This is a reducer, not a generator. Emit ONLY " +
+		"findings that already appear in the 'Combined findings' list in the " +
+		"user message below — do not synthesise new findings based on your own " +
+		"assessment of the MR. If you cannot point a claim at a specific " +
+		"file:line from the input list, omit it. The observed failure mode " +
+		"otherwise is hallucinated claims (e.g. \"the MR contains no Go code\" " +
+		"when it clearly does) that the reviewer has no way to catch downstream."
 
 	user = fmt.Sprintf(
 		"MR: !%d %q\n\nPer-chunk summaries:\n%s\n\nCombined findings (count=%d):\n%s\n\nEmit the merged JSON object.",
