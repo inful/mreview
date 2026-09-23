@@ -220,6 +220,9 @@ func applyConfigToEnv(cfg *config.File) func() {
 	if v := cfg.Server.QueueSize; v > 0 {
 		set("MREVIEW_QUEUE_SIZE", intToStr(v))
 	}
+	if v := cfg.Server.Workers; v > 0 {
+		set("MREVIEW_WORKERS", intToStr(v))
+	}
 	if v := cfg.Server.ShutdownTimeout; v != "" {
 		set("MREVIEW_SHUTDOWN_TIMEOUT", v)
 	}

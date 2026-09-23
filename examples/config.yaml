@@ -94,6 +94,12 @@ server:
   # webhook events get HTTP 503 so GitLab retries later.
   queue_size: 32
 
+  # Steady-state concurrency cap (number of simultaneous review
+  # goroutines). Distinct from queue_size, which is the burst
+  # buffer. Lower for slow / shared LLMs; raise for batched /
+  # fast inference. Uncomment to override the default (4).
+  # workers: 4
+
   # Graceful shutdown drain timeout.
   shutdown_timeout: 30s
 

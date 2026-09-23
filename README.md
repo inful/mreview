@@ -214,12 +214,13 @@ Usage: mreview serve [flags]
 Flags:
       --addr=":8080"                              HTTP listen address.
       --webhook-secret=STRING                     GitLab webhook shared secret ($GITLAB_WEBHOOK_SECRET).
-      --queue-size=32                             Max concurrent reviews queued.
+      --queue-size=32                             Burst buffer for webhook deliveries that arrive while the pool is busy.
+      --workers=4                                 Maximum concurrent review goroutines (steady-state cap; distinct from --queue-size).
       --shutdown-timeout=30s                      Graceful shutdown drain timeout.
       --gitlab-url=...                            (same as review)
       --gitlab-token=STRING                       (required, $GITLAB_TOKEN)
       --llm-url=..., --llm-api-key=STRING, --model=STRING, ...
-                                                 (same as review)
+                                                  (same as review)
 ```
 
 `serve` registers `POST /webhook` (the GitLab webhook target) and
@@ -553,6 +554,7 @@ suffix only for guidance — keep the schema as is.
 | `--chunk-retries`             | `MREVIEW_CHUNK_RETRIES`       | `1`                              |
 | `--allow-partial`             | `MREVIEW_ALLOW_PARTIAL`       | (unset)                          |
 | `--queue-size` (serve)        | `MREVIEW_QUEUE_SIZE`          | `32`                             |
+| `--workers` (serve)           | `MREVIEW_WORKERS`             | `4`                              |
 | `--addr` (serve)              | `MREVIEW_ADDR`                | `:8080`                          |
 | `--shutdown-timeout` (serve)  | `MREVIEW_SHUTDOWN_TIMEOUT`    | `30s`                            |
 | `--retries`                   | `MREVIEW_RETRIES`            | `3`                              |
@@ -755,6 +757,8 @@ honored up to a 60-second cap (longer values get clipped).
 |---|---|
 | Reviews take minutes per MR | Smaller model (7B → 3B); faster hardware; lower `--max-diff-bytes` |
 | Frequent "queue full" 503s on `serve` | Raise `--queue-size`; scale up `mreview serve` replicas (each is stateless — they don't share dedupe state today, which is a known limitation, see [Issue: shared dedupe store](#) for the future fix) |
+| LLM is shared with other tenants and concurrency is too high | Lower `--workers` (e.g. `--workers=1` for a single-Ollama-on-a-Pi, `--workers=2` for shared CPUs) |
+| LLM has request batching and concurrency is too low | Raise `--workers` (e.g. `--workers=8` for vLLM with continuous batching on multi-core) |
 | Bot posts near-duplicate findings across pushes | Switch dedupe to `(file, line, body)` (deferred) |
 | LLM OOMs on a chunk | Lower `--max-diff-bytes`; use a smaller context window |
 
