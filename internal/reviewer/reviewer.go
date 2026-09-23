@@ -498,16 +498,7 @@ func (r *Reviewer) consolidate(ctx context.Context, mr *gitlab.MergeRequest, chu
 		allFindings = append(allFindings, c.Findings...)
 	}
 
-	system := "You are merging per-chunk code review outputs into one verdict. " +
-		"Output ONLY a JSON object matching the ReviewResponse schema " +
-		"(findings array + summary string). " +
-		"Preserve every finding from the inputs — do not drop any. " +
-		"Write a single, consolidated summary paragraph."
-
-	user := fmt.Sprintf(
-		"MR: !%d %q\n\nPer-chunk summaries:\n%s\n\nCombined findings (count=%d):\n%s\n\nEmit the merged JSON object.",
-		mr.IID, mr.Title, summaries.String(), len(allFindings), formatFindings(allFindings),
-	)
+	system, user := buildMergePrompt(mr, chunks)
 
 	r.cfg.Logger.Debug("llm merge prompt",
 		"model", r.cfg.Model,
@@ -717,6 +708,53 @@ func formatFindings(fs []llm.Finding) string {
 			i+1, f.File, f.Line, f.Severity, f.Category, f.Body)
 	}
 	return b.String()
+}
+
+// buildMergePrompt composes the (system, user) prompt pair that
+// asks the LLM to consolidate per-chunk ReviewResponses into one
+// final verdict. The schema is included inline (not just described)
+// because observed behavior: when the schema is implied, merge
+// LLMs occasionally rename "body" to "message" or "description",
+// and the downstream filterFindings() drops anything with an empty
+// Body. Pinning the field names explicitly makes the merge LLM
+// preserve them.
+//
+// Extracted as a helper so tests can assert the schema is present
+// without driving a full consolidate() call.
+func buildMergePrompt(mr *gitlab.MergeRequest, chunks []llm.ReviewResponse) (system, user string) {
+	var summaries strings.Builder
+	var allFindings []llm.Finding
+	for i, c := range chunks {
+		fmt.Fprintf(&summaries, "Chunk %d summary: %s\n", i+1, c.Summary)
+		allFindings = append(allFindings, c.Findings...)
+	}
+
+	system = "You are merging per-chunk code review outputs into one verdict. " +
+		"Output ONLY a JSON object matching the ReviewResponse schema below — " +
+		"every field name must match exactly so the result can be parsed:\n\n" +
+		"{\n" +
+		`  "findings": [` + "\n" +
+		"    {\n" +
+		`      "file": "<path at HEAD>",` + "\n" +
+		`      "line": <1-indexed line number>,` + "\n" +
+		`      "severity": "info" | "warning" | "error",` + "\n" +
+		`      "category": "<one of: security, correctness, style, perf, test, docs>",` + "\n" +
+		`      "body": "<one or two sentences of markdown — REQUIRED, do NOT rename to 'message' or 'description'>",` + "\n" +
+		`      "suggestion": "<optional code block; empty string if none>"` + "\n" +
+		"    }\n" +
+		"  ],\n" +
+		`  "summary": "<one consolidated paragraph>"` + "\n" +
+		"}\n\n" +
+		"Preserve every finding from the inputs — do not drop any. " +
+		"Every field above (file, line, severity, category, body, suggestion) " +
+		"must be carried through verbatim; renaming 'body' to 'message' will " +
+		"cause the finding to be silently dropped on the reviewer side."
+
+	user = fmt.Sprintf(
+		"MR: !%d %q\n\nPer-chunk summaries:\n%s\n\nCombined findings (count=%d):\n%s\n\nEmit the merged JSON object.",
+		mr.IID, mr.Title, summaries.String(), len(allFindings), formatFindings(allFindings),
+	)
+	return system, user
 }
 
 // dedupeFindings collapses findings that share (file, line, body).
