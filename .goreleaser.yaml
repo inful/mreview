@@ -56,6 +56,15 @@ archives:
       - LICENSE*
       - examples/*.yaml
       - examples/*.md
+      # The mreview Docker image bundles the tokensave binary
+      # (MIT). The release archive doesn't ship the tokensave
+      # binary itself — operators pull the Docker image for the
+      # bundled pair, and the mreview binary alone is enough for
+      # anyone running `mreview` outside the container. We do
+      # ship the tokensave LICENSE so downstream consumers see
+      # the third-party notice alongside AGPL-3.0.
+      - src: scripts/NOTICE-tokensave.txt
+        dst: NOTICE-tokensave.txt
 
 checksum:
   # The checksum file is included in the release as `checksums.txt` so
@@ -65,12 +74,21 @@ checksum:
 dockers_v2:
   # Two image variants per release, identical to repo-mr-file:
   #
-  #   :vX.Y.Z          — production, distroless static, ~5 MB
-  #   :vX.Y.Z-debug    — debug, distroless static-debug (busybox), ~6 MB
+  #   :vX.Y.Z          — production, distroless static, mreview + tokensave
+  #   :vX.Y.Z-debug    — debug, distroless static-debug (busybox), mreview + tokensave
   #
   # The `-debug` suffix variant gives operators a shell inside the
   # container for debugging without changing the binary or the
   # ENTRYPOINT.
+  #
+  # Tokensave is bundled into the image by the Dockerfile's
+  # multi-stage build (see Dockerfile). GoReleaser only lays down
+  # the per-platform mreview binary — the Dockerfile pulls +
+  # verifies the pinned tokensave release per-arch. The version
+  # pin lives in Dockerfile's ARG block; bump it there to roll
+  # the bundle forward. The release archive ships the tokensave
+  # NOTICE file (see archives.files) so consumers see the
+  # third-party license alongside AGPL-3.0.
   -
     id: mreview
     dockerfile: Dockerfile
@@ -84,10 +102,18 @@ dockers_v2:
       - '{{ .Version }}'
     annotations:
       org.opencontainers.image.title: mreview
-      org.opencontainers.image.description: Automated LLM merge-request reviews for GitLab.
+      org.opencontainers.image.description: Automated LLM merge-request reviews for GitLab. Bundles the tokensave MCP server for code-graph queries.
       org.opencontainers.image.url: https://github.com/inful/mreview
       org.opencontainers.image.source: https://github.com/inful/mreview
       org.opencontainers.image.licenses: AGPL-3.0-only
+      # Document the third-party component for downstream consumers
+      # and image scanners. The version pin is enforced by
+      # Dockerfile's ARG block; OCI consumers can read this
+      # annotation without running the image.
+      org.opencontainers.image.title.tokensave: tokensave
+      org.opencontainers.image.version.tokensave: 7.12.1
+      org.opencontainers.image.source.tokensave: https://github.com/aovestdipaperino/tokensave
+      org.opencontainers.image.licenses.tokensave: MIT
   -
     id: mreview-debug
     dockerfile: Dockerfile.debug
@@ -101,7 +127,11 @@ dockers_v2:
       - '{{ .Version }}-debug'
     annotations:
       org.opencontainers.image.title: mreview (debug)
-      org.opencontainers.image.description: mreview with busybox shell for debugging.
+      org.opencontainers.image.description: mreview with busybox shell for debugging. Bundles the tokensave MCP server.
       org.opencontainers.image.url: https://github.com/inful/mreview
       org.opencontainers.image.source: https://github.com/inful/mreview
       org.opencontainers.image.licenses: AGPL-3.0-only
+      org.opencontainers.image.title.tokensave: tokensave
+      org.opencontainers.image.version.tokensave: 7.12.1
+      org.opencontainers.image.source.tokensave: https://github.com/aovestdipaperino/tokensave
+      org.opencontainers.image.licenses.tokensave: MIT

@@ -39,6 +39,9 @@ https://gitlab.example.com/group/project/-/merge_requests/42
 - [CI artifact reuse](#ci-artifact-reuse)
 - [What the bot posts](#what-the-bot-posts)
 - [Exit codes](#exit-codes)
+- [Read-only tool surface](#read-only-tool-surface)
+- [Tokensave bundle](#tokensave-bundle)
+- [CI artifact reuse](#ci-artifact-reuse)
 - [Configuration](#configuration)
 - [Onboarding via central CI](#onboarding-via-central-ci)
 - [Architecture](#architecture)
@@ -150,6 +153,11 @@ docker run --rm ghcr.io/inful/mreview:latest --help
 # Debug image (with busybox shell for `docker exec` debugging):
 docker pull ghcr.io/inful/mreview:latest-debug
 ```
+
+The container image bundles both `mreview` and `tokensave` so
+the example CI templates work end-to-end with no extra setup.
+See [Tokensave bundle](#tokensave-bundle) for the version pin,
+checksums, and the `--tokensave-bin` escape hatch.
 
 ### `go install`
 
@@ -519,6 +527,95 @@ edit_file / write_file tools are imported only by tests that
 prove they aren't registered; mreview never references them
 in production code.
 
+## Tokensave bundle
+
+`mreview` is only useful when the tokensave MCP server can
+connect. The container image (`ghcr.io/inful/mreview:*`) bundles
+the binary at `/usr/local/bin/tokensave` so the example CI
+templates work out of the box — without this, the harness
+spawn fails inside `distroless/static` (no `tokensave` on
+`$PATH`) and the agent silently falls back to read_file-only
+mode.
+
+### What's bundled
+
+| Component       | Version | Path in image                  | License      |
+|-----------------|---------|--------------------------------|--------------|
+| `mreview`       | (build) | `/mreview`                     | AGPL-3.0     |
+| `tokensave`     | 7.12.1  | `/usr/local/bin/tokensave`     | MIT          |
+
+The third-party MIT notice ships in each release archive as
+`NOTICE-tokensave.txt`.
+
+### Version pin
+
+The version is pinned in `Dockerfile` (and `Dockerfile.debug`)
+via build args:
+
+```dockerfile
+ARG TOKENSAVE_VERSION=7.12.1
+ARG TOKENSAVE_SHA_AMD64=184612db16800e384a1bcdc7fadcc53fa73bda70240f9c0416ac4b88c7e924fb
+ARG TOKENSAVE_SHA_ARM64=7de5c95b51d508f39a83d9420ad0700502de107a61dbb38dad3d008d4f6f4261
+```
+
+To roll forward, update the three values together (Linux/amd64
+and Linux/arm64 checksums) and the same SHA entries in
+`scripts/tokensave-smoke.sh`. Pull the new checksums from the
+upstream [`SHA256SUMS`](https://github.com/aovestdipaperino/tokensave/releases/latest)
+asset — **never** compute them from a freshly-downloaded
+archive (fail-closed, same policy as `tokensave upgrade`).
+Avoid v7.12.0; its release pipeline was broken and the tag was
+withdrawn.
+
+### Contract smoke test
+
+`scripts/tokensave-smoke.sh` verifies three things every CI
+run, before the image gets built:
+
+1. The pinned release URL serves an archive matching the
+   pinned SHA256 (so the Dockerfile build wouldn't be
+   downloading a stale asset).
+2. The extracted binary runs (`tokensave --version`).
+3. The MCP subcommand is `serve` (not `mcp`) and accepts
+   `--path <project>` — the shape `mreview` passes to it
+   from `internal/tokensave/mcp.go`.
+
+This caught a real drift: an earlier version of this code
+spawned `tokensave mcp --project-root <path>`, which the
+v7.12.x CLI no longer accepts. The smoke test now blocks the
+build until the contract is corrected, and the contract smoke
+is wired into `.github/workflows/ci.yml` as the
+`tokensave-smoke` job.
+
+### Escape hatch: `--tokensave-bin`
+
+If you need a different tokensave build (newer release,
+self-hosted fork, locally-built debug binary), mount it into
+the container and point mreview at it:
+
+```bash
+docker run --rm \
+  -v /path/to/your-tokensave:/usr/local/bin/tokensave:ro \
+  ghcr.io/inful/mreview:latest \
+  review --tokensave-bin=/usr/local/bin/tokensave ...
+```
+
+The flag accepts an absolute path; mreview execs it directly
+without `PATH` lookup. Disable the MCP server entirely with
+`--tokensave-enabled=false` (the agent falls back to
+read_file-only mode; useful when tokensave is unsuitable for
+the repo, e.g. a vendored tree too large to index).
+
+### `tokensave-sync` still runs separately
+
+The CI pipeline's `tokensave-sync` stage (see
+`examples/central-ci.yml`) is **not** replaced by the bundled
+binary. It does one-shot indexing (`tokensave sync`) that
+primes the `.tokensave/` cache; the bundled binary is the MCP
+server that runs at query time. The sync stage image and the
+bundled version should be the same release — when you bump one,
+bump the other.
+
 ## CI artifact reuse
 
 The central CI pipeline runs build / test / lint / vulncheck
@@ -687,7 +784,7 @@ the parser. The system prompt's contract is locked in by tests.
 | `--model`                     | `MREVIEW_MODEL`               | `qwen2.5-coder:7b`               |
 | `--workdir`                   | `MREVIEW_WORKDIR`             | empty (defaults to repo root)     |
 | `--tokensave-enabled`         | `MREVIEW_TOKENSAVE_ENABLED`   | `true`                           |
-| `--tokensave-bin`             | `MREVIEW_TOKENSAVE_BIN`       | `tokensave`                      |
+| `--tokensave-bin`             | `MREVIEW_TOKENSAVE_BIN`       | `tokensave` (`PATH` lookup; the Docker image has it at `/usr/local/bin/tokensave`) |
 | `--artifacts-dir`             | `MREVIEW_ARTIFACTS_DIR`       | `.mreview-artifacts`             |
 | `--policy-file`               | `MREVIEW_POLICY_FILE`         | empty (no policy)                |
 | `--on-drafts`                 | `MREVIEW_ON_DRAFTS`           | `skip`                           |

@@ -1,17 +1,46 @@
 # syntax=docker/dockerfile:1.7
 #
-# Debug image for mreview. Same binary as the production image, but
-# built on gcr.io/distroless/static:debug-nonroot which ships busybox.
-# Useful for `docker exec -it <container> /busybox/sh` debugging and
-# CI jobs that want ls/cat/env available alongside the binary.
+# Debug image for mreview. Same binary layout as the production
+# image, but built on gcr.io/distroless/static:debug-nonroot which
+# ships busybox. Useful for `docker exec -it <container> /busybox/sh`
+# debugging and CI jobs that want ls/cat/env available alongside
+# the binary.
 #
 # Multi-arch notes: see Dockerfile. The debug base image is also a
 # manifest list, so buildx pulls the right arch variant.
+#
+# Tokensave bundle: identical to the production Dockerfile. See
+# Dockerfile for the version pin rationale and the MCP contract
+# that the pin enforces. The CLI shape is `tokensave serve --path <path>`;
+# tokensave's older `mcp --project-root` shape is no longer used.
 
+# Stage 1: download + verify + unpack the pinned tokensave release.
+FROM alpine:3.20 AS tokensave
+ARG TARGETARCH
+ARG TOKENSAVE_VERSION=7.12.1
+ARG TOKENSAVE_SHA_AMD64=184612db16800e384a1bcdc7fadcc53fa73bda70240f9c0416ac4b88c7e924fb
+ARG TOKENSAVE_SHA_ARM64=7de5c95b51d508f39a83d9420ad0700502de107a61dbb38dad3d008d4f6f4261
+
+RUN set -eux; \
+    case "${TARGETARCH}" in \
+        amd64) SHA="${TOKENSAVE_SHA_AMD64}"; ASSET="x86_64"  ;; \
+        arm64) SHA="${TOKENSAVE_SHA_ARM64}"; ASSET="aarch64" ;; \
+        *) echo "Unsupported TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    mkdir -p /out; \
+    curl -fsSL --retry 3 -o /tmp/tokensave.tar.gz \
+        "https://github.com/aovestdipaperino/tokensave/releases/download/v${TOKENSAVE_VERSION}/tokensave-v${TOKENSAVE_VERSION}-${ASSET}-linux.tar.gz"; \
+    echo "${SHA}  /tmp/tokensave.tar.gz" | sha256sum -c -; \
+    tar -xzf /tmp/tokensave.tar.gz -C /out; \
+    install -m 0755 /out/tokensave /out/tokensave; \
+    /out/tokensave --version
+
+# Stage 2: distroless debug runtime (busybox shell available).
 FROM gcr.io/distroless/static:debug-nonroot AS runtime
 
 ARG TARGETPLATFORM
 COPY --chown=65532:65532 ${TARGETPLATFORM}/mreview /mreview
+COPY --from=tokensave --chown=65532:65532 /out/tokensave /usr/local/bin/tokensave
 
 # Same entrypoint as the production image — debug differs only by
 # having a shell available for exec.

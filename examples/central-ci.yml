@@ -99,9 +99,17 @@ govulncheck:
 # One-shot indexing. The MCP server itself is spawned inside
 # mreview's runtime — this stage just primes the cache so the
 # agent's first code-graph query is fast.
+#
+# Image pin MUST match the version bundled in the mreview
+# Docker image (see Dockerfile ARG block). Mismatched
+# versions work today (the sync DB format is stable) but
+# the contract is "everything below is one tokensave
+# version" — drift between the sync image and the runtime
+# MCP binary risks subtle index compatibility bugs. When
+# you bump one, bump both.
 tokensave-sync:
   stage: index
-  image: your-registry/tokensave:latest
+  image: ghcr.io/aovestdipaperino/tokensave:7.12.1
   script:
     - tokensave sync --project-root "$CI_PROJECT_DIR" --db "$TOKENSAVE_DB"
   cache:

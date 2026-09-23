@@ -111,3 +111,23 @@ jobs:
           echo "=== Final ls cmd/ ==="
           ls cmd/
           go build -trimpath -ldflags="-s -w" -o dist/mreview-${{ matrix.os }}-${{ matrix.arch }} ./cmd/mreview
+
+  # Contract smoke test for the bundled tokensave binary. The
+  # Dockerfile pins tokensave to a specific version + SHA256;
+  # this job verifies the pinned release still serves a binary
+  # that matches the contract the spawn code expects
+  # (`tokensave serve --path <project>` — see
+  # internal/tokensave/mcp.go). Catches contract drift before
+  # the Docker build layer downloads a stale asset.
+  #
+  # Keep this in sync with Dockerfile's ARG block and
+  # scripts/tokensave-smoke.sh.
+  tokensave-smoke:
+    name: Tokensave MCP contract smoke
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run tokensave smoke test
+        run: ./scripts/tokensave-smoke.sh 7.12.1
