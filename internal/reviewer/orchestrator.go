@@ -119,6 +119,17 @@ type Config struct {
 	// multi-line responses stay readable). False by default.
 	DebugLLM bool
 
+	// NoDedup disables the same-commit dedup. When false
+	// (the default), the orchestrator looks for a prior
+	// mreview summary on the MR; if its commit SHA matches
+	// the current MR HEAD, the run short-circuits and the
+	// LLM is never invoked. When true, every run goes
+	// through the full pipeline and posts fresh — useful
+	// after a prompt change or when the prior review was
+	// wrong and a re-roll is desired. CI that requires an
+	// audit trail of every run should set this to true.
+	NoDedup bool
+
 	Logger *slog.Logger
 }
 
@@ -156,6 +167,14 @@ type Result struct {
 	DedupeSize  int
 	PolicyError bool // any error-verdict finding → exit 8
 	PolicyWarn  bool
+
+	// SkippedReason is non-empty when the orchestrator
+	// short-circuited and didn't run the LLM. Today only one
+	// path produces a skip: a prior mreview summary on the MR
+	// already covers the current commit (see dedup logic in
+	// Run). Future skip paths (e.g. dry-run-only mode) may
+	// also set this.
+	SkippedReason string
 }
 
 // PostedFinding records one inline-discussion post (or a
@@ -184,7 +203,52 @@ func (o *Orchestrator) Run(ctx context.Context, project string, iid int, action 
 	if err != nil {
 		return nil, fmt.Errorf("orchestrator: fetch MR: %w", err)
 	}
-	logger.Info("fetched MR", "title", mr.Title, "state", mr.State)
+	logger.Info("fetched MR", "title", mr.Title, "state", mr.State, "sha", mr.SHA)
+
+	// Dedup by commit: before any LLM work, look for a prior
+	// mreview summary on this MR. If we find one with the
+	// same commit SHA, this run is a no-op — the prior
+	// review already represents this exact commit, and
+	// re-running would burn tokens for no new information.
+	//
+	// If we find one with a DIFFERENT SHA, the source branch
+	// has new commits since the prior run. Resolve the prior
+	// summary + every prior inline-finding discussion so they
+	// collapse in the GitLab UI; then proceed with the new
+	// run, which will post a fresh summary and fresh findings
+	// that visually supersede the prior.
+	//
+	// Skipped by --no-dedup (operator override: force a fresh
+	// run regardless, e.g. after a prompt change or when the
+	// prior review was wrong and a re-roll is desired).
+	if !o.cfg.NoDedup && mr.SHA != "" {
+		prior, perr := o.findPriorSummary(ctx, project, iid, logger)
+		if perr != nil {
+			logger.Debug("dedup pre-check failed; proceeding with fresh review",
+				"err", perr.Error(),
+			)
+		} else if prior != nil {
+			if prior.Commit == mr.SHA {
+				logger.Info("review skipped: already reviewed this commit",
+					"commit", mr.SHA,
+					"prior_summary_id", prior.SummaryDiscussionID,
+					"prior_findings", len(prior.FindingDiscussionIDs),
+				)
+				return &Result{
+					MR:            mr,
+					SkippedReason: "already reviewed this commit",
+				}, nil
+			}
+			// Different commit → supersede.
+			logger.Info("dedup: resolving prior review before posting new",
+				"prior_commit", prior.Commit,
+				"new_commit", mr.SHA,
+				"prior_summary_id", prior.SummaryDiscussionID,
+				"prior_findings", len(prior.FindingDiscussionIDs),
+			)
+			o.resolvePrior(ctx, project, iid, prior, logger)
+		}
+	}
 
 	// Branch sanity-check: if the workdir is checked out on a
 	// different branch than the MR's source branch, tokensave
@@ -370,8 +434,17 @@ func (o *Orchestrator) Run(ctx context.Context, project string, iid int, action 
 	}
 
 	// Post the summary (skip on update events).
+	//
+	// Dedup-marker wiring: we post the summary with the
+	// commit-only marker (no finding IDs yet — findings
+	// post AFTER this). After all findings are posted, we
+	// collect their discussion IDs and EDIT the summary
+	// note in place so the marker carries the full
+	// `commit=... findings=...` payload. The next mreview
+	// run reads this marker to decide skip-vs-update.
+	var postedFindingIDs []string
 	if !o.cfg.DryRun && act != "update" {
-		body := renderSummary(mr, resp.Summary, policyRes.Findings)
+		body := renderSummary(mr, resp.Summary, policyRes.Findings, nil)
 		if body != "" {
 			note, err := o.cfg.GitLab.PostSummary(ctx, project, iid, body)
 			if err != nil {
@@ -396,11 +469,79 @@ func (o *Orchestrator) Run(ctx context.Context, project string, iid int, action 
 			result.Findings = append(result.Findings, PostedFinding{Finding: f, Skipped: true, Reason: err.Error()})
 			continue
 		}
-		_ = disc
+		// Capture the discussion ID so the dedup marker
+		// (added to the summary via EditSummary below) can
+		// reference it. Without this, the next mreview run
+		// can detect "prior summary at this SHA" but cannot
+		// resolve the prior inline findings when the SHA
+		// advances.
+		if disc != nil {
+			postedFindingIDs = append(postedFindingIDs, disc.ID)
+		}
 		result.Findings = append(result.Findings, PostedFinding{Finding: f})
 	}
 
+	// Edit the summary in place to add the full marker (with
+	// the inline-finding IDs we just posted). The summary was
+	// posted above with a commit-only marker; this one PUT
+	// round-trip fills in the findings= slot. Skipped when
+	// there are no findings to record — the commit-only
+	// marker is already correct — and when DryRun skipped
+	// the posts.
+	if !o.cfg.DryRun && len(postedFindingIDs) > 0 && result.Summary != nil {
+		fullBody := renderSummary(mr, resp.Summary, policyRes.Findings, postedFindingIDs)
+		if _, err := o.cfg.GitLab.EditSummary(ctx, project, iid, result.Summary.ID, fullBody); err != nil {
+			logger.Warn("summary marker edit failed",
+				"note_id", result.Summary.ID,
+				"err", err.Error(),
+			)
+		}
+	}
+
 	return result, nil
+}
+
+// findPriorSummary fetches the MR's existing discussions and
+// returns the most recent mreview summary (identified by the
+// dedup marker in its first note body), or nil if no prior
+// summary exists. Errors are returned to the caller; the
+// caller chooses whether to fail-closed or fail-open.
+//
+// This is a method (not a free function) so it stays near
+// the orchestrator that owns the dedup policy.
+func (o *Orchestrator) findPriorSummary(ctx context.Context, project string, iid int, logger *slog.Logger) (*PriorReview, error) {
+	discs, err := o.cfg.GitLab.ListDiscussions(ctx, project, iid)
+	if err != nil {
+		return nil, err
+	}
+	logger.Debug("dedup: scanned existing discussions",
+		"project", project, "iid", iid, "discussions", len(discs),
+	)
+	return FindPriorMReviewSummary(discs), nil
+}
+
+// resolvePrior walks the prior review's findings + summary
+// and resolves each one via the GitLab API. Resolved threads
+// collapse to "Show resolved comments" by default in GitLab,
+// which is the visual signal we want when a new mreview run
+// supersedes a prior one. Failures are logged at warn level
+// and the loop continues — a 404 on one stale ID shouldn't
+// cancel the rest of the resolve calls.
+func (o *Orchestrator) resolvePrior(ctx context.Context, project string, iid int, prior *PriorReview, logger *slog.Logger) {
+	if prior.SummaryDiscussionID != "" {
+		if err := o.cfg.GitLab.ResolveDiscussion(ctx, project, iid, prior.SummaryDiscussionID); err != nil {
+			logger.Warn("dedup: failed to resolve prior summary",
+				"summary_id", prior.SummaryDiscussionID, "err", err.Error(),
+			)
+		}
+	}
+	for _, fid := range prior.FindingDiscussionIDs {
+		if err := o.cfg.GitLab.ResolveDiscussion(ctx, project, iid, fid); err != nil {
+			logger.Warn("dedup: failed to resolve prior finding",
+				"finding_id", fid, "err", err.Error(),
+			)
+		}
+	}
 }
 
 // enforcedToLocal converts policy.EnforcedFinding back to the
@@ -604,8 +745,22 @@ func buildInlineComment(meta gitlab.ChangeFile, f Finding) gitlab.InlineComment 
 // terminate the table row; backslash-escape them. Newlines
 // inside bodies become `<br>` so each sentence keeps its
 // own visual line inside the table cell.
-func renderSummary(mr *gitlab.MergeRequest, summary string, findings []policy.EnforcedFinding) string {
+//
+// Dedup marker: when mr.SHA is non-empty, the body is
+// preceded by a hidden HTML comment carrying the commit SHA
+// and the inline-finding discussion IDs that this run
+// posted. The next mreview run on this MR reads the marker
+// to (1) skip if the SHA matches, or (2) resolve the prior
+// findings and post fresh ones if the SHA differs. The
+// marker is invisible in GitLab's rendered view. See
+// marker.go (FormatMarkerLine / ParseMarkerLine) for the
+// wire format.
+func renderSummary(mr *gitlab.MergeRequest, summary string, findings []policy.EnforcedFinding, findingIDs []string) string {
 	var b strings.Builder
+	if mr != nil && mr.SHA != "" {
+		b.WriteString(FormatMarkerLine(mr.SHA, findingIDs))
+		b.WriteString("\n")
+	}
 	b.WriteString("# mreview summary\n\n")
 	if summary != "" {
 		b.WriteString(summary)

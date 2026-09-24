@@ -14,8 +14,8 @@ import (
 // sentinel is the operator's only signal that mreview ran
 // successfully).
 func TestRenderSummary_EmptyFindings(t *testing.T) {
-	mr := &gitlab.MergeRequest{Title: "Test MR"}
-	out := renderSummary(mr, "Looks fine to me.", nil)
+	mr := &gitlab.MergeRequest{Title: "Test MR", SHA: "sha-1"}
+	out := renderSummary(mr, "Looks fine to me.", nil, nil)
 
 	for _, want := range []string{
 		"# mreview summary",
@@ -40,7 +40,7 @@ func TestRenderSummary_EmptyFindings(t *testing.T) {
 // the four-column table. This is the failure-mode test
 // for the "all squashed together" GitLab rendering bug.
 func TestRenderSummary_SingleFinding(t *testing.T) {
-	mr := &gitlab.MergeRequest{}
+	mr := &gitlab.MergeRequest{SHA: "sha-1"}
 	findings := []policy.EnforcedFinding{
 		{
 			File:     "cmd/main.go",
@@ -51,7 +51,7 @@ func TestRenderSummary_SingleFinding(t *testing.T) {
 			Verdict:  policy.SeverityError,
 		},
 	}
-	out := renderSummary(mr, "", findings)
+	out := renderSummary(mr, "", findings, []string{"d-a"})
 
 	// The header row is GitLab's signal that this is a table.
 	for _, want := range []string{
@@ -68,13 +68,13 @@ func TestRenderSummary_SingleFinding(t *testing.T) {
 // TestRenderSummary_MultipleFindings confirms each finding
 // becomes its own row (no squashing into a single line).
 func TestRenderSummary_MultipleFindings(t *testing.T) {
-	mr := &gitlab.MergeRequest{}
+	mr := &gitlab.MergeRequest{SHA: "sha-1"}
 	findings := []policy.EnforcedFinding{
 		{File: "a.go", Line: 1, Severity: policy.SeverityError, Category: "security", Body: "Hard-coded secret.", Verdict: policy.SeverityError},
 		{File: "b.go", Line: 7, Severity: policy.SeverityWarning, Category: "perf", Body: "O(n^2) loop.", Verdict: policy.SeverityWarning},
 		{File: "c.go", Line: 13, Severity: policy.SeverityInfo, Category: "style", Body: "Naming nit.", Verdict: policy.SeverityInfo},
 	}
-	out := renderSummary(mr, "", findings)
+	out := renderSummary(mr, "", findings, []string{"d-a", "d-b", "d-c"})
 
 	// Each finding must occupy its own line; if any two ended
 	// up on the same line, the table render in GitLab would
@@ -96,7 +96,7 @@ func TestRenderSummary_MultipleFindings(t *testing.T) {
 // emit an explicit <br>; without this fix the body becomes
 // an unreadable wall.
 func TestRenderSummary_BodyWithNewlines(t *testing.T) {
-	mr := &gitlab.MergeRequest{}
+	mr := &gitlab.MergeRequest{SHA: "sha-1"}
 	findings := []policy.EnforcedFinding{
 		{
 			File:     "x.go",
@@ -107,7 +107,7 @@ func TestRenderSummary_BodyWithNewlines(t *testing.T) {
 			Verdict:  policy.SeverityWarning,
 		},
 	}
-	out := renderSummary(mr, "", findings)
+	out := renderSummary(mr, "", findings, nil)
 
 	if !strings.Contains(out, "First sentence.<br>Second sentence.<br>Third sentence.") {
 		t.Errorf("newlines should be replaced with <br>; got:\n%s", out)
@@ -124,7 +124,7 @@ func TestRenderSummary_BodyWithNewlines(t *testing.T) {
 // pipe inside the body would terminate the table row and
 // break the markdown structure downstream.
 func TestRenderSummary_BodyWithPipes(t *testing.T) {
-	mr := &gitlab.MergeRequest{}
+	mr := &gitlab.MergeRequest{SHA: "sha-1"}
 	findings := []policy.EnforcedFinding{
 		{
 			File:     "x.go",
@@ -135,7 +135,7 @@ func TestRenderSummary_BodyWithPipes(t *testing.T) {
 			Verdict:  policy.SeverityInfo,
 		},
 	}
-	out := renderSummary(mr, "", findings)
+	out := renderSummary(mr, "", findings, nil)
 
 	want := "Use `a \\| b` rather than the alternative."
 	if !strings.Contains(out, want) {
@@ -149,7 +149,7 @@ func TestRenderSummary_BodyWithPipes(t *testing.T) {
 // (via policy.severity_override) should render with the
 // error emoji.
 func TestRenderSummary_VerdictOverridesSeverity(t *testing.T) {
-	mr := &gitlab.MergeRequest{}
+	mr := &gitlab.MergeRequest{SHA: "sha-1"}
 	findings := []policy.EnforcedFinding{
 		{
 			File:     "x.go",
@@ -160,7 +160,7 @@ func TestRenderSummary_VerdictOverridesSeverity(t *testing.T) {
 			Verdict:  policy.SeverityError,
 		},
 	}
-	out := renderSummary(mr, "", findings)
+	out := renderSummary(mr, "", findings, nil)
 
 	if !strings.Contains(out, "| 🛑 error |") {
 		t.Errorf("verdict (not severity) should drive emoji; got:\n%s", out)
@@ -171,11 +171,11 @@ func TestRenderSummary_VerdictOverridesSeverity(t *testing.T) {
 // layout: a top heading, an optional summary paragraph,
 // then the <details>-wrapped table.
 func TestRenderSummary_SummaryAndFindings(t *testing.T) {
-	mr := &gitlab.MergeRequest{}
+	mr := &gitlab.MergeRequest{SHA: "sha-1"}
 	findings := []policy.EnforcedFinding{
 		{File: "x.go", Line: 1, Severity: policy.SeverityWarning, Category: "test", Body: "Missing test for foo.", Verdict: policy.SeverityWarning},
 	}
-	out := renderSummary(mr, "Overall LGTM.", findings)
+	out := renderSummary(mr, "Overall LGTM.", findings, []string{"d-x"})
 
 	wantOrder := []string{
 		"# mreview summary",
@@ -200,6 +200,52 @@ func TestRenderSummary_SummaryAndFindings(t *testing.T) {
 	}
 }
 
+// TestRenderSummary_MarkerPrepended pins the dedup marker
+// at the top of the rendered body when mr.SHA is non-empty.
+// The marker is the wire format the next mreview run reads
+// to detect prior reviews; if its format or position drifts,
+// the dedup flow silently regresses to "no prior summary
+// found, post fresh every time".
+func TestRenderSummary_MarkerPrepended(t *testing.T) {
+	mr := &gitlab.MergeRequest{SHA: "abc123def"}
+	out := renderSummary(mr, "", nil, nil)
+	want := "<!-- mreview:commit=abc123def -->"
+	if !strings.Contains(out, want) {
+		t.Errorf("commit-only marker not present; got:\n%s", out)
+	}
+	// Marker must come BEFORE the body — operator-visible
+	// content stays at top.
+	markerIdx := strings.Index(out, want)
+	bodyIdx := strings.Index(out, "# mreview summary")
+	if !(markerIdx >= 0 && bodyIdx > markerIdx) {
+		t.Errorf("ordering wrong: marker=%d body=%d\n%s", markerIdx, bodyIdx, out)
+	}
+}
+
+// TestRenderSummary_MarkerWithFindings pins the marker
+// shape when there ARE findings: commit + comma-separated
+// finding IDs at the very top.
+func TestRenderSummary_MarkerWithFindings(t *testing.T) {
+	mr := &gitlab.MergeRequest{SHA: "deadbeef"}
+	out := renderSummary(mr, "", nil, []string{"d-1", "d-2", "d-3"})
+	want := "<!-- mreview:commit=deadbeef findings=d-1,d-2,d-3 -->"
+	if !strings.Contains(out, want) {
+		t.Errorf("findings-bearing marker not present; got:\n%s", out)
+	}
+}
+
+// TestRenderSummary_NoMarkerWhenSHAEmpty confirms the
+// fallback: an MR whose projection doesn't carry SHA
+// (older deployments, API edge case) renders without a
+// marker. The next run can't dedup, but it can still post.
+func TestRenderSummary_NoMarkerWhenSHAEmpty(t *testing.T) {
+	mr := &gitlab.MergeRequest{} // SHA: ""
+	out := renderSummary(mr, "", nil, []string{"d-1"})
+	if strings.Contains(out, "<!-- mreview:") {
+		t.Errorf("expected no marker when SHA is empty; got:\n%s", out)
+	}
+}
+
 // TestRenderSummary_DetailsWrapping pins the new
 // <details>/<summary> structure end-to-end. This is the
 // regression test for the rendering change that puts the
@@ -208,13 +254,13 @@ func TestRenderSummary_SummaryAndFindings(t *testing.T) {
 // row instead of dumping the whole table into the MR's
 // activity feed.
 func TestRenderSummary_DetailsWrapping(t *testing.T) {
-	mr := &gitlab.MergeRequest{}
+	mr := &gitlab.MergeRequest{SHA: "sha-1"}
 	findings := []policy.EnforcedFinding{
 		{File: "a.go", Line: 1, Severity: policy.SeverityError, Category: "x", Body: "one", Verdict: policy.SeverityError},
 		{File: "b.go", Line: 2, Severity: policy.SeverityError, Category: "x", Body: "two", Verdict: policy.SeverityError},
 		{File: "c.go", Line: 3, Severity: policy.SeverityError, Category: "x", Body: "three", Verdict: policy.SeverityError},
 	}
-	out := renderSummary(mr, "", findings)
+	out := renderSummary(mr, "", findings, nil)
 
 	// Single <details> block that opens before the table and
 	// closes after it. Critical: no nested or stray

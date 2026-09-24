@@ -68,6 +68,12 @@ type clientDeps struct {
 	// 10+ only when the MR is unusually complex.
 	MaxTurns int
 
+	// NoDedup disables the dedup-by-commit path in the
+	// orchestrator (see ReviewCmd.NoDedup). False by
+	// default; when true, every run produces a fresh review
+	// and resolves any prior summary/findings.
+	NoDedup bool
+
 	// Tokensave MCP integration (issue #42 step 4). When
 	// TokensaveEnabled is true (the default), the orchestrator
 	// spawns the tokensave subprocess and registers its tools

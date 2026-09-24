@@ -112,6 +112,18 @@ type ReviewCmd struct {
 	// for tight-budget models that emit a lot per turn.
 	MaxTurns int `default:"6" name:"max-turns" env:"MREVIEW_MAX_TURNS" help:"Cap on the agent's tool-use loop. Default 6; raise for complex MRs, lower for tight-budget models that emit more per turn."`
 
+	// NoDedup disables the same-SHA-skip path. The default
+	// behaviour: if a prior mreview summary exists on the
+	// MR with a commit SHA matching the current MR HEAD,
+	// skip the LLM run entirely (the prior review still
+	// represents this commit). Set this to true to force a
+	// fresh review regardless — useful when the operator
+	// wants to rerun the model after a prompt change, or
+	// when the prior review was wrong and a re-roll is
+	// desired. CI that doesn't want any review to be silently
+	// skipped (compliance reasons) should set this to true.
+	NoDedup bool `name:"no-dedup" env:"MREVIEW_NO_DEDUP" help:"Disable same-commit-skip dedup; force a fresh review every run. Default false."`
+
 	// Per-event branching (issue #41 / migration step 1 of #42).
 	OnDrafts string `default:"skip" name:"on-drafts" enum:"run,skip" env:"MREVIEW_ON_DRAFTS" help:"Action on draft MRs (CI_MERGE_REQUEST_DRAFT=true): run the review or skip with exit 0. Default skip."`
 	OnPush   string `default:"skip" name:"on-push" enum:"run,skip" env:"MREVIEW_ON_PUSH" help:"Action on direct branch pushes (CI_PIPELINE_SOURCE=push): run the review or skip with exit 0. Default skip."`
@@ -296,6 +308,7 @@ func runReview(parentCtx context.Context, stdout io.Writer, c *ReviewCmd, cfg *c
 		RetryBackoff:     c.RetryBackoff,
 		MaxOutputTokens:  c.MaxOutputTokens,
 		MaxTurns:         c.MaxTurns,
+		NoDedup:          c.NoDedup,
 		TokensaveEnabled: c.TokensaveEnabled,
 		TokensaveBin:     c.TokensaveBin,
 		Artifacts:        artifactSet,

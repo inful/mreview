@@ -11,6 +11,13 @@ import (
 // MergeRequest is the subset of *gitlab.MergeRequest that the
 // reviewer actually consumes. The fields are a flat, JSON-marshalable
 // projection so callers don't need to import the upstream package.
+//
+// SHA is the GitLab API's source-branch HEAD commit hash. Used by
+// the reviewer as the dedup key: if a prior mreview summary
+// exists on this MR with a matching SHA, the new run can skip
+// (no LLM call). When the SHA differs, prior findings are
+// resolved so the new run's findings take visual precedence
+// without losing history.
 type MergeRequest struct {
 	IID          int64  `json:"iid"`
 	Title        string `json:"title"`
@@ -20,6 +27,7 @@ type MergeRequest struct {
 	TargetBranch string `json:"target_branch"`
 	Author       User   `json:"author"`
 	WebURL       string `json:"web_url"`
+	SHA          string `json:"sha"`
 	DiffRefs     `json:"diff_refs"`
 }
 
@@ -93,6 +101,7 @@ func projectMR(mr *gl.MergeRequest) *MergeRequest {
 		SourceBranch: mr.SourceBranch,
 		TargetBranch: mr.TargetBranch,
 		WebURL:       mr.WebURL,
+		SHA:          mr.SHA,
 		DiffRefs: DiffRefs{
 			BaseSHA:  mr.DiffRefs.BaseSha,
 			HeadSHA:  mr.DiffRefs.HeadSha,
