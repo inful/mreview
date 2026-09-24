@@ -578,6 +578,23 @@ func buildInlineComment(meta gitlab.ChangeFile, f Finding) gitlab.InlineComment 
 // posts as a single MR-level note. Kept here for now; a future
 // PR may move it into internal/prompts for templating parity
 // with the system prompt.
+//
+// The Findings section is rendered as a Markdown table
+// (severity emoji + verdict, file path, line, category, body)
+// rather than a bullet list. The earlier bullet-list form
+// (`%s **%s** \`%s:%d\` — %s\n`) was rendering as one
+// squashed paragraph in GitLab because (a) adjacent bullets
+// without a blank line collapse into a single line block and
+// (b) long bodies wrap without internal breaks. The table
+// gives each finding its own row with the body in its own
+// cell — GitLab renders each row as a distinct line — and
+// inline `<br>` separators keep multi-line bodies readable
+// inside the cell.
+//
+// Body escaping: pipe characters in the body would otherwise
+// terminate the table row; backslash-escape them. Newlines
+// inside bodies become `<br>` so each sentence keeps its
+// own visual line inside the table cell.
 func renderSummary(mr *gitlab.MergeRequest, summary string, findings []policy.EnforcedFinding) string {
 	var b strings.Builder
 	b.WriteString("# mreview summary\n\n")
@@ -590,6 +607,8 @@ func renderSummary(mr *gitlab.MergeRequest, summary string, findings []policy.En
 		b.WriteString("No issues found.\n")
 		return b.String()
 	}
+	b.WriteString("| Severity | File | Line | Category | Description |\n")
+	b.WriteString("|----------|------|-----:|----------|-------------|\n")
 	for _, f := range findings {
 		emoji := "•"
 		switch policy.Severity(f.Verdict) {
@@ -600,8 +619,16 @@ func renderSummary(mr *gitlab.MergeRequest, summary string, findings []policy.En
 		case policy.SeverityInfo:
 			emoji = "ℹ️"
 		}
-		fmt.Fprintf(&b, "%s **%s** `%s:%d` — %s\n",
-			emoji, f.Verdict, f.File, f.Line, strings.TrimSpace(f.Body))
+		body := strings.TrimSpace(f.Body)
+		// Markdown tables render newlines as a literal space
+		// inside a cell; <br> is the documented GitLab-Flavored
+		// Markdown escape for an in-cell line break.
+		body = strings.ReplaceAll(body, "\r\n", "<br>")
+		body = strings.ReplaceAll(body, "\n", "<br>")
+		// Pipe would terminate the row; backslash-escape.
+		body = strings.ReplaceAll(body, "|", `\|`)
+		fmt.Fprintf(&b, "| %s %s | `%s` | %d | %s | %s |\n",
+			emoji, f.Verdict, f.File, f.Line, f.Category, body)
 	}
 	return b.String()
 }
