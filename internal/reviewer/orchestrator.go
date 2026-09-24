@@ -239,14 +239,26 @@ func (o *Orchestrator) Run(ctx context.Context, project string, iid int, action 
 					SkippedReason: "already reviewed this commit",
 				}, nil
 			}
-			// Different commit → supersede.
-			logger.Info("dedup: resolving prior review before posting new",
+			// Different commit → run a fresh review. We
+			// intentionally do NOT auto-resolve the prior
+			// summary or its inline findings: resolving a
+			// finding that hasn't actually been fixed is
+			// misleading — the operator would see "resolved"
+			// on something they should still be looking at.
+			// The new run will post a fresh summary at the
+			// top of the MR's activity feed (newest first in
+			// GitLab), and any new findings at locations
+			// that don't already have an unresolved prior
+			// finding. Prior findings remain in whatever
+			// state the operator left them in; the
+			// file:line dedup downstream prevents duplicate
+			// comments at the same location.
+			logger.Info("dedup: fresh review will run (different commit, prior not auto-resolved)",
 				"prior_commit", prior.Commit,
 				"new_commit", mr.SHA,
 				"prior_summary_id", prior.SummaryDiscussionID,
 				"prior_findings", len(prior.FindingDiscussionIDs),
 			)
-			o.resolvePrior(ctx, project, iid, prior, logger)
 		}
 	}
 
@@ -409,26 +421,28 @@ func (o *Orchestrator) Run(ctx context.Context, project string, iid int, action 
 		"has_error", policyRes.HasError,
 	)
 
-	// Dedupe against existing discussions.
+	// Dedupe against existing discussions. The dedup gate is
+	// file:line against UNRESOLVED prior findings — see the
+	// comment on file_line_dedup.go for the rationale. A
+	// prior finding that the operator already resolved (or
+	// that an earlier mreview run marked obsolete) is NOT in
+	// the set; we want the LLM to be free to surface a new
+	// finding at the same location if one really exists.
 	discs, err := o.cfg.GitLab.ListDiscussions(ctx, project, iid)
 	if err != nil {
 		logger.Warn("dedupe fetch failed; proceeding without dedupe", "err", err.Error())
 		discs = nil
 	}
-	fpSet := newFingerprintSet(discs, o.cfg.BotUsername)
-	logger.Info("dedupe set built", "size", fpSet.Size())
-	// Convert EnforcedFinding → Finding for the dedupe + post
-	// stages (the dedupe fingerprints Body, the GitLab post
-	// builds an InlineComment from the local Finding fields).
-	toPost := enforcedToLocal(policyRes.Findings)
-	if fpSet.Size() > 0 {
-		toPost = dedupeAgainstSet(policyRes.Findings, fpSet, logger)
-	}
+	priorLocs := findPriorFindingLocations(discs, o.cfg.BotUsername)
+	logger.Info("dedupe set built (file:line, unresolved prior)",
+		"size", priorLocs.Size(),
+	)
+	toPost := dedupFindingsByFileLine(policyRes.Findings, priorLocs, logger)
 
 	result := &Result{
 		MR:          mr,
 		Findings:    make([]PostedFinding, 0, len(toPost)),
-		DedupeSize:  fpSet.Size(),
+		DedupeSize:  priorLocs.Size(),
 		PolicyError: policyRes.HasError,
 		PolicyWarn:  policyRes.HasWarning,
 	}
@@ -518,48 +532,6 @@ func (o *Orchestrator) findPriorSummary(ctx context.Context, project string, iid
 		"project", project, "iid", iid, "discussions", len(discs),
 	)
 	return FindPriorMReviewSummary(discs), nil
-}
-
-// resolvePrior walks the prior review's findings + summary
-// and resolves each one via the GitLab API. Resolved threads
-// collapse to "Show resolved comments" by default in GitLab,
-// which is the visual signal we want when a new mreview run
-// supersedes a prior one. Failures are logged at warn level
-// and the loop continues — a 404 on one stale ID shouldn't
-// cancel the rest of the resolve calls.
-func (o *Orchestrator) resolvePrior(ctx context.Context, project string, iid int, prior *PriorReview, logger *slog.Logger) {
-	if prior.SummaryDiscussionID != "" {
-		if err := o.cfg.GitLab.ResolveDiscussion(ctx, project, iid, prior.SummaryDiscussionID); err != nil {
-			logger.Warn("dedup: failed to resolve prior summary",
-				"summary_id", prior.SummaryDiscussionID, "err", err.Error(),
-			)
-		}
-	}
-	for _, fid := range prior.FindingDiscussionIDs {
-		if err := o.cfg.GitLab.ResolveDiscussion(ctx, project, iid, fid); err != nil {
-			logger.Warn("dedup: failed to resolve prior finding",
-				"finding_id", fid, "err", err.Error(),
-			)
-		}
-	}
-}
-
-// enforcedToLocal converts policy.EnforcedFinding back to the
-// local Finding type (preserves Body, File, Line, Category;
-// uses Verdict as Severity so the GitLab post uses the
-// post-policy severity).
-func enforcedToLocal(in []policy.EnforcedFinding) []Finding {
-	out := make([]Finding, len(in))
-	for i, f := range in {
-		out[i] = Finding{
-			File:     f.File,
-			Line:     f.Line,
-			Severity: Severity(f.Verdict),
-			Category: f.Category,
-			Body:     f.Body,
-		}
-	}
-	return out
 }
 
 // applyPolicy runs the loaded policy against the agent's
