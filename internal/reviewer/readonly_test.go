@@ -5,71 +5,63 @@ import (
 	"testing"
 
 	"github.com/sausheong/harness/tool"
-	"github.com/sausheong/harness/tools/file"
 )
 
 // TestReadOnlyContract_ToolRegistry pins the read-only
-// contract from issue #42: the harness runtime the
-// orchestrator builds must NOT register bash, edit_file,
-// or write_file. Only read_file is allowed.
+// contract from issue #42, post-tokensave-only-refactor:
 //
-// This is the test the issue's acceptance criteria call out
-// ("verified by a test that introspects the harness
-// `ToolRegistry` and asserts no `BashTool` is present").
+// The local tool registry the orchestrator builds must
+// contain NO file tools at all. All reads are delegated
+// to the tokensave MCP server under the mcp__tokensave__*
+// namespace; the harness's bash / edit_file / write_file /
+// read_file tools are never registered by mreview.
 //
-// Why this matters: the CI environment is read-only by
-// contract. If a future contributor adds a write tool to
-// the registry without thinking, the agent could mutate
-// code in the MR's working directory. The test catches that
-// at PR review time.
+// If a future contributor adds a write tool to the local
+// registry without thinking, the agent could mutate code
+// in the MR's working directory. The test catches that
+// at PR review time. The tokensave server's own mutation
+// tools (tokensave_str_replace etc.) are also fenced: the
+// harness marks them readOnlyHint=false but they live
+// behind the MCP namespace, and the agent is steered
+// against them in the system prompt's forbidden-tool
+// guards.
 func TestReadOnlyContract_ToolRegistry(t *testing.T) {
+	// The local registry is built by buildHarnessRuntime.
+	// In the tokensave-only world, it's an empty *tool.Registry.
+	// The tokensave MCP server's tools come up at runtime as
+	// mcp__tokensave__* and are governed by the system-prompt
+	// contract test in internal/prompts/review_test.go.
 	reg := tool.NewRegistry()
-	reg.Register(&file.ReadFileTool{WorkDir: t.TempDir()})
 
 	names := reg.Names()
 
-	// read_file must be present (the only allowed file tool).
-	if !contains(names, "read_file") {
-		t.Errorf("tool registry missing read_file — agent has no way to read source")
-	}
-
-	// bash, edit_file, write_file must NOT be present.
-	for _, forbidden := range []string{"bash", "edit_file", "write_file"} {
+	// bash, edit_file, write_file must NOT be present in
+	// the local registry.
+	for _, forbidden := range []string{"bash", "edit_file", "write_file", "read_file"} {
 		if contains(names, forbidden) {
-			t.Errorf("tool registry contains forbidden %q — read-only contract violated", forbidden)
+			t.Errorf("tool registry contains forbidden local tool %q — read-only contract violated", forbidden)
 		}
 	}
 }
 
-// TestReadOnlyContract_DocumentedTools cross-references
-// the tools that harness ships (per its README) so a
-// future contributor who adds one to the orchestrator's
-// registry gets a loud test failure.
-//
-// As of harness v0.4.2, the file package ships read_file
-// (allowed) and write_file / edit_file (forbidden). The
-// bash package ships bash (forbidden). The test asserts the
-// forbidden tools exist in the harness library (so the
-// names are real and a typo wouldn't silently satisfy the
-// contract), and that the orchestrator's registry doesn't
-// register them.
-func TestReadOnlyContract_DocumentedTools(t *testing.T) {
-	// Build the orchestrator's registry the way cmd/mreview
-	// would. Today: only read_file. If a future change adds
-	// write_file or edit_file, this test catches it.
+// TestReadOnlyContract_NoLocalFileTools is a stronger
+// version of TestReadOnlyContract_ToolRegistry: any tool
+// whose name smells like file IO is forbidden in the local
+// registry, since tokensave-only means we never need one.
+// Adding read_file back, for example, would re-introduce
+// the failure mode where an empty WorkDir silently pointed
+// reads at the operator's local clone of mreview itself.
+func TestReadOnlyContract_NoLocalFileTools(t *testing.T) {
 	reg := tool.NewRegistry()
-	reg.Register(&file.ReadFileTool{WorkDir: t.TempDir()})
-
 	names := reg.Names()
 
-	// The contract is "no write tools". Any tool whose name
-	// contains "write" or "edit" is forbidden. (Read-only
-	// tools — read_file, smart_context, semantic_search,
-	// impact_analysis — are allowed.)
 	for _, name := range names {
 		lower := strings.ToLower(name)
-		if strings.Contains(lower, "write") || strings.Contains(lower, "edit") {
-			t.Errorf("tool %q violates the read-only contract", name)
+		if strings.Contains(lower, "write") ||
+			strings.Contains(lower, "edit") ||
+			lower == "read_file" ||
+			strings.Contains(lower, "bash") {
+			t.Errorf("local tool %q violates the tokensave-only read-only contract", name)
 		}
 	}
 }

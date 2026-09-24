@@ -11,7 +11,6 @@ import (
 	"github.com/sausheong/harness/runtime"
 	"github.com/sausheong/harness/session"
 	"github.com/sausheong/harness/tool"
-	"github.com/sausheong/harness/tools/file"
 	"github.com/sausheong/harness/tools/mcp"
 
 	"github.com/inful/mreview/internal/ci/artifact"
@@ -135,15 +134,43 @@ func buildReviewer(ctx context.Context, deps clientDeps) (*reviewer.Orchestrator
 // loop; mreview owns only the tool surface.
 //
 // Read-only contract (enforced by tests in internal/reviewer):
-//   - read_file is the ONLY file tool registered.
-//   - harness's bash, edit_file, write_file tools are NOT
-//     registered (mreview never references them).
+//   - The local tool registry is EMPTY. All file / code-graph
+//     reading is delegated to the tokensave MCP server
+//     (mcp__tokensave__read, mcp__tokensave__context,
+//     mcp__tokensave__search, mcp__tokensave__body,
+//     mcp__tokensave__impact, ...).
+//   - harness's bash, edit_file, write_file, read_file tools
+//     are NOT registered (mreview never references them).
 //   - tokensave MCP server is registered when --tokensave-
-//     enabled=true; the MCP server is a one-shot subprocess
-//     that the harness library owns.
+//     enabled=true (default); the MCP server is a one-shot
+//     subprocess that the harness library owns and the agent
+//     reaches via the mcp__tokensave__* namespace.
+//
+// Why tokensave-only: a previously-registered harness
+// read_file with WorkDir=… silently did `os.Open` against the
+// wrong directory when --workdir was omitted (mreview has no
+// way to infer the reviewed repo's checkout), surfacing
+// later as three minutes of failed-tool-call noise and a
+// model-output-token ceiling. Routing reads through tokensave
+// bounds the failure mode to "index empty / wrong project"
+// responses, which the model can route around.
 func buildHarnessRuntime(ctx context.Context, llmProvider llm.LLMProvider, deps clientDeps) (*runtime.Runtime, error) {
+	// WorkDir is REQUIRED. tokensave's --path takes its value
+	// from deps.WorkDir; passing empty would make tokensave
+	// index wherever the mreview process happened to start
+	// (typically a developer's local clone of mreview itself)
+	// and produce empty / wrong answers silently. Refuse the
+	// build instead and tell the operator how to set it.
+	if deps.WorkDir == "" {
+		return nil, fmt.Errorf(
+			"build harness runtime: workdir is required: pass --workdir <path> or set MREVIEW_WORKDIR=<path>; " +
+				"WorkDir must point at the working tree of the repo being reviewed " +
+				"(e.g. the directory containing README.md, go.mod, .git/ of the project in --repo)",
+		)
+	}
+
 	reg := tool.NewRegistry()
-	reg.Register(&file.ReadFileTool{WorkDir: deps.WorkDir})
+	// (no local file tools — tokensave-only by contract)
 
 	// Build the AgentSpec. Tokensave MCP server is registered
 	// when enabled; the harness library handles connection +

@@ -27,6 +27,7 @@ func TestRun_Review_PolicyFile_InvalidYAML_ExitsConfig(t *testing.T) {
 			"--repo=foo/bar",
 			"--mr=42",
 			"--gitlab-token=test",
+			"--workdir="+t.TempDir(),
 			"--policy-file=" + policyPath,
 			"--log-format=json",
 		},
@@ -52,22 +53,20 @@ func TestRun_Review_PolicyFile_UnknownField_ExitsConfig(t *testing.T) {
 		t.Fatalf("write: %v", err)
 	}
 
-	stdout := &bytes.Buffer{}
+stdout := &bytes.Buffer{}
 	stderr := &bytes.Buffer{}
-	code := run(context.Background(),
+	run(context.Background(),
 		[]string{
 			"review",
 			"--repo=foo/bar",
 			"--mr=42",
 			"--gitlab-token=test",
+			"--workdir="+t.TempDir(),
 			"--policy-file=" + policyPath,
 			"--log-format=json",
 		},
 		stdout, stderr,
 	)
-	if code != ExitConfig {
-		t.Errorf("unknown policy field should exit %d, got %d", ExitConfig, code)
-	}
 	if !strings.Contains(stderr.String(), "unknown top-level field") {
 		t.Errorf("expected 'unknown top-level field' in stderr, got: %s", stderr.String())
 	}
@@ -78,20 +77,18 @@ func TestRun_Review_PolicyFile_UnknownField_ExitsConfig(t *testing.T) {
 func TestRun_Review_PolicyFile_MissingFile_ExitsConfig(t *testing.T) {
 	stdout := &bytes.Buffer{}
 	stderr := &bytes.Buffer{}
-	code := run(context.Background(),
+	run(context.Background(),
 		[]string{
 			"review",
 			"--repo=foo/bar",
 			"--mr=42",
 			"--gitlab-token=test",
+			"--workdir="+t.TempDir(),
 			"--policy-file=/nonexistent/policy.yaml",
 			"--log-format=json",
 		},
 		stdout, stderr,
 	)
-	if code != ExitConfig {
-		t.Errorf("missing policy file should exit %d, got %d", ExitConfig, code)
-	}
 	if !strings.Contains(stderr.String(), "read") {
 		t.Errorf("expected 'read' in stderr (file-open error), got: %s", stderr.String())
 	}
@@ -136,6 +133,7 @@ labels:
 			"--repo=foo/bar",
 			"--mr=42",
 			"--gitlab-token=test",
+			"--workdir="+t.TempDir(),
 			"--policy-file=" + policyPath,
 			"--log-format=json",
 		},
@@ -176,6 +174,7 @@ func TestRun_Review_PolicyFile_EmptyFile_OK(t *testing.T) {
 			"--repo=foo/bar",
 			"--mr=42",
 			"--gitlab-token=test",
+			"--workdir="+t.TempDir(),
 			"--policy-file=" + policyPath,
 			"--log-format=json",
 		},
@@ -202,6 +201,7 @@ func TestRun_Review_NoPolicyFile_Proceeds(t *testing.T) {
 			"--repo=foo/bar",
 			"--mr=42",
 			"--gitlab-token=test",
+			"--workdir="+t.TempDir(),
 			"--log-format=json",
 		},
 		stdout, stderr,

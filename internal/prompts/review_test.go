@@ -18,8 +18,15 @@ func TestReviewSystemPrompt_CoreContract(t *testing.T) {
 	// The read-only contract: the prompt must enumerate the
 	// exact tool surface the agent sees. Adding or removing a
 	// tool here changes what the agent can do.
+	//
+	// As of the tokensave-only refactor, the local harness
+	// tool registry is empty — every read goes through
+	// tokensave's MCP server. The agent must see at least the
+	// three friendly-named code-graph tools it has always
+	// relied on, plus the raw-file reader that replaces
+	// read_file.
 	requiredTools := []string{
-		"read_file",
+		"mcp__tokensave__read",
 		"mcp__tokensave__smart_context",
 		"mcp__tokensave__semantic_search",
 		"mcp__tokensave__impact_analysis",

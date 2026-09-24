@@ -41,11 +41,29 @@ type ReviewCmd struct {
 	BaseURL  string `name:"provider-base-url" env:"MREVIEW_PROVIDER_BASE_URL" help:"Provider base URL (required for litellm / local; ignored for hosted providers)."`
 	Model    string `default:"qwen2.5-coder:7b" name:"model" env:"MREVIEW_MODEL" help:"Model name (provider-specific; passed to the harness provider)."`
 
-	// WorkDir is the harness agent's working directory — the
-	// repo root. The harness's read_file tool restricts reads
-	// to this path (no escape upward). CI sets it to
+	// WorkDir is the path to the reviewed repo's working
+	// tree. tokensave's MCP server reads from this path; the
+	// local tool registry is otherwise empty (see clients.go
+	// for why). REQUIRED — mreview does not auto-detect the
+	// reviewed repo, and an empty value used to silently
+	// produce a runtime panic, then a three-minute
+	// failed-tool-call loop that surfaced as "model reached
+	// its output limit". Set via --workdir or
+	// MREVIEW_WORKDIR=<abs-path>. CI typically sets
 	// "$CI_PROJECT_DIR".
-	WorkDir string `name:"workdir" env:"MREVIEW_WORKDIR" type:"path" help:"Working directory the harness runs against (defaults to the repo root)."`
+	//
+	// Note: NO `type:"path"` annotation. The annotation made
+	// kong silently default the field to os.Getwd() when the
+	// flag was omitted — exactly the lie the help text used
+	// to tell ("defaults to the repo root"). Without it, an
+	// empty value flows through to runReview, where the
+	// fast-fail check produces a clear ExitConfig pointing
+	// at this flag and MREVIEW_WORKDIR.
+	//
+	// Examples:
+	//   --workdir ~/repos/sfb/57_pipeline_canary
+	//   MREVIEW_WORKDIR=$CI_PROJECT_DIR mreview review …
+	WorkDir string `name:"workdir" env:"MREVIEW_WORKDIR" help:"REQUIRED: path to the reviewed repo's working tree. Set via --workdir or MREVIEW_WORKDIR=<path>. mreview refuses to run without it."`
 
 	// BotUsername is the username the GitLab token posts as;
 	// dedupe ignores comments authored by other humans. When
@@ -157,6 +175,25 @@ func runReview(parentCtx context.Context, stdout io.Writer, c *ReviewCmd, cfg *c
 			"reason", decision.Reason,
 			"source", ev.Source,
 		)
+	}
+
+	// Fast-fail on the most common config mistake: empty
+	// --workdir. Without this check, mreview would build a
+	// harness runtime that points tokensave at the operator's
+	// CWD, index the wrong project, and either return
+	// unhelpful "no such symbol" responses or, on the old
+	// read_file path, ENOENT-loop until the model's output
+	// budget exhausted. Placed AFTER the event guard so
+	// scheduled invocations that are skipping (draft / push)
+	// don't surface a confusing config error instead of the
+	// expected skip log.
+	if c.WorkDir == "" {
+		const msg = "workdir is required: pass --workdir <path-to-reviewed-repo> or set MREVIEW_WORKDIR=<path>"
+		logger.Error(msg,
+			"flag", "--workdir",
+			"env", "MREVIEW_WORKDIR",
+		)
+		return &ExitError{Code: ExitConfig, Reason: msg}
 	}
 
 	// Policy load (issue #42 migration step 2).

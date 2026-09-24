@@ -4,12 +4,15 @@
 // and to the user message on RunSync); PR #6 may move them
 // to embedded Markdown for team overlays.
 //
-// The prompts encode the read-only contract: the agent sees
-// exactly two tool types (read_file, tokensave MCP) and is
-// instructed never to propose edits. This is the harness-side
-// half of the "no shell access / no write access" guarantee;
-// the orchestrator-side half is the read-only tool registry
-// built in orchestrator.go.
+// The prompts encode the read-only contract: the agent's
+// only file-reading surface is the tokensave MCP server
+// (mcp__tokensave__read for raw source + the full
+// code-graph tool family under mcp__tokensave__*). It is
+// instructed never to propose edits. This is the
+// harness-side half of the "no shell access / no write
+// access" guarantee; the orchestrator-side half is the
+// (empty) read-only tool registry built in
+// buildHarnessRuntime in cmd/mreview/clients.go.
 package prompts
 
 import (

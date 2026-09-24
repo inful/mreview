@@ -59,11 +59,16 @@ func TestRun_NoSubcommandReturnsConfigError(t *testing.T) {
 	}
 }
 func TestRun_ReviewSubcommand_ParsesFlags(t *testing.T) {
+	// --workdir is required post-tokensave-only refactor;
+	// t.TempDir() satisfies the validator without needing a
+	// real GitLab or tokensave round-trip (the test still
+	// expects to fail at the GitLab auth step).
 	_, stderr, code := runWithArgs(t,
 		"review",
 		"--repo=foo/bar",
 		"--mr=42",
 		"--gitlab-token=test",
+		"--workdir="+t.TempDir(),
 		"--dry-run",
 		"--log-format=json",
 	)
@@ -114,6 +119,65 @@ func TestRun_ReviewSubcommand_MissingRequiredRepo(t *testing.T) {
 	if !strings.Contains(stderr, "--repo") {
 		t.Errorf("expected '--repo' in stderr, got: %q", stderr)
 	}
+}
+
+// TestRun_ReviewSubcommand_MissingWorkdir is the regression
+// test for the failure mode where empty --workdir sent reads
+// to the wrong directory and burned through the model's
+// output budget. After the tokensave-only refactor, an empty
+// --workdir must abort the run at start with ExitConfig and
+// a message that points the operator at both --workdir and
+// MREVIEW_WORKDIR. The check is at the top of runReview so
+// it fires before policy load, artifact load, or any harness
+// work — fail-fast is the whole point.
+func TestRun_ReviewSubcommand_MissingWorkdir(t *testing.T) {
+	t.Run("missing --workdir flag fails fast with ExitConfig", func(t *testing.T) {
+		// Clear MREVIEW_WORKDIR so the test isn't poisoned by
+		// the developer's shell env. t.Setenv restores on
+		// cleanup.
+		t.Setenv("MREVIEW_WORKDIR", "")
+		_, stderr, code := runWithArgs(t,
+			"review",
+			"--repo=foo/bar",
+			"--mr=42",
+			"--gitlab-token=test",
+			"--dry-run",
+			"--log-format=json",
+		)
+		if code != ExitConfig {
+			t.Errorf("empty --workdir returned %d, want %d (ExitConfig)\nstderr: %s", code, ExitConfig, stderr)
+		}
+		if !strings.Contains(stderr, "workdir is required") {
+			t.Errorf("expected 'workdir is required' in stderr, got: %q", stderr)
+		}
+		if !strings.Contains(stderr, "MREVIEW_WORKDIR") {
+			t.Errorf("error should mention MREVIEW_WORKDIR env var, got: %q", stderr)
+		}
+	})
+
+	t.Run("MREVIEW_WORKDIR env satisfies the validator", func(t *testing.T) {
+		// Exercise the env-var fallback. The validator only
+		// checks that WorkDir is non-empty; we expect the
+		// same ExitAuth the ParsesFlags test exercises.
+		t.Setenv("MREVIEW_WORKDIR", t.TempDir())
+		_, _, code := runWithArgs(t,
+			"review",
+			"--repo=foo/bar",
+			"--mr=42",
+			"--gitlab-token=test",
+			"--dry-run",
+			"--log-format=json",
+		)
+		// We don't assert exactly which non-OK exit (auth
+		// 401 vs the rest) — we only assert that the
+		// validator let the run pass and we got to a
+		// downstream exit code. Pre-refactor this test was
+		// impossible; now it must succeed the validator and
+		// surface a downstream failure.
+		if code == ExitConfig {
+			t.Errorf("env-supplied MREVIEW_WORKDIR was rejected; validator didn't pick it up")
+		}
+	})
 }
 
 func TestRun_ReviewSubcommand_InvalidMR(t *testing.T) {
@@ -211,6 +275,7 @@ provider:
 			"--repo=foo/bar",
 			"--mr=42",
 			"--gitlab-token=test",
+			"--workdir="+t.TempDir(),
 			"--model=cli-model:7b", // override
 			"--log-format=json",
 		}, stdout, stderr,

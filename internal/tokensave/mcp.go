@@ -1,5 +1,5 @@
 // Package tokensave wires the tokensave MCP server into the
-// harness runtime as mreview's primary code-graph tool.
+// harness runtime as mreview's ONLY file-reading tool.
 //
 // Why this package exists: tokensave (a Rust binary at
 // https://tokensave.dev/) is the language-agnostic answer to
@@ -8,12 +8,25 @@
 // embeds it as a one-shot subprocess that the harness
 // library spawns and tears down per Run.
 //
-// Per the architecture reset (#42, migration step 4),
-// tokensave is the ONLY non-read_file tool the agent sees.
-// The MCP server names its tools under the `tokensave__`
-// namespace (harness's MCP convention), so they show up as
-// `mcp__tokensave__smart_context`, `mcp__tokensave__...`
-// etc. in the agent's tool registry.
+// Per the tokensave-only refactor, the harness's local tool
+// registry is empty — there is no read_file, no bash, no
+// edit_file, no write_file. All reads — raw source bytes,
+// symbol-level queries, semantic search, blast radius —
+// flow through the tokensave MCP server under the
+// mcp__tokensave__* namespace (e.g. mcp__tokensave__read,
+// mcp__tokensave__smart_context, mcp__tokensave__search,
+// mcp__tokensave__body, mcp__tokensave__impact).
+//
+// The switch away from harness's read_file was driven by
+// the "empty --workdir silently produces ENOENT-loop"
+// failure mode: with --workdir unset the harness's
+// read_file read from the operator's CWD, the agent
+// retried for minutes, and the run eventually surfaced as
+// "model reached its output limit". Routing reads through
+// tokensave bounds the failure to "index empty / wrong
+// project" responses the model can route around, and lets
+// --workdir validation in cmd/mreview/clients.go fail
+// fast before any tokensave indexing starts.
 package tokensave
 
 import (

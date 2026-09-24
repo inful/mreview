@@ -121,19 +121,20 @@ func TestRun_Review_DraftMR_WithRunOverride_Proceeds(t *testing.T) {
 	t.Setenv("CI_MERGE_REQUEST_IID", "42")
 	t.Setenv("CI_MERGE_REQUEST_DRAFT", "true")
 
-	stdout := &bytes.Buffer{}
-	stderr := &bytes.Buffer{}
-	run(context.Background(),
-		[]string{
-			"review",
-			"--repo=foo/bar",
-			"--mr=42",
-			"--gitlab-token=test",
-			"--on-drafts=run",
-			"--log-format=json",
-		},
-		stdout, stderr,
-	)
+stdout := &bytes.Buffer{}
+		stderr := &bytes.Buffer{}
+		run(context.Background(),
+			[]string{
+				"review",
+				"--repo=foo/bar",
+				"--mr=42",
+				"--gitlab-token=test",
+				"--workdir="+t.TempDir(),
+				"--on-drafts=run",
+				"--log-format=json",
+			},
+			stdout, stderr,
+		)
 	if !strings.Contains(stderr.String(), "starting review") {
 		t.Errorf("--on-drafts=run should let the review proceed; got:\n%s",
 			stderr.String())
@@ -160,6 +161,7 @@ func TestRun_Review_LocalInvocation_NoEnv_Proceeds(t *testing.T) {
 			"--repo=foo/bar",
 			"--mr=42",
 			"--gitlab-token=test",
+			"--workdir="+t.TempDir(),
 			"--log-format=json",
 		},
 		stdout, stderr,
@@ -241,6 +243,7 @@ func TestRun_Review_PushSource_WithRunOverride_Proceeds(t *testing.T) {
 			"--repo=foo/bar",
 			"--mr=42",
 			"--gitlab-token=test",
+			"--workdir="+t.TempDir(),
 			"--on-push=run",
 			"--log-format=json",
 		},
