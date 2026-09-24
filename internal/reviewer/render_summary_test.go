@@ -9,7 +9,7 @@ import (
 )
 
 // TestRenderSummary_EmptyFindings pins the "no issues" path
-// so a future regression that prints `## Findings` followed
+// so a future regression that prints `<details>` followed
 // by an empty table fails loudly (the "no issues found"
 // sentinel is the operator's only signal that mreview ran
 // successfully).
@@ -20,8 +20,10 @@ func TestRenderSummary_EmptyFindings(t *testing.T) {
 	for _, want := range []string{
 		"# mreview summary",
 		"Looks fine to me.",
-		"## Findings",
+		"<details>",
+		"<summary>Findings (0)</summary>",
 		"No issues found.",
+		"</details>",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("missing %q in output:\n%s", want, out)
@@ -167,7 +169,7 @@ func TestRenderSummary_VerdictOverridesSeverity(t *testing.T) {
 
 // TestRenderSummary_SummaryAndFindings confirms the full
 // layout: a top heading, an optional summary paragraph,
-// then the table.
+// then the <details>-wrapped table.
 func TestRenderSummary_SummaryAndFindings(t *testing.T) {
 	mr := &gitlab.MergeRequest{}
 	findings := []policy.EnforcedFinding{
@@ -178,9 +180,11 @@ func TestRenderSummary_SummaryAndFindings(t *testing.T) {
 	wantOrder := []string{
 		"# mreview summary",
 		"\nOverall LGTM.\n",
-		"## Findings",
+		"<details>",
+		"<summary>Findings (1)</summary>",
 		"| Severity |",
 		"| ⚠️ warning | `x.go` | 1 | test | Missing test for foo. |",
+		"</details>",
 	}
 	last := 0
 	for _, want := range wantOrder {
@@ -193,5 +197,58 @@ func TestRenderSummary_SummaryAndFindings(t *testing.T) {
 			t.Errorf("order wrong: %q appeared at %d, expected after %d", want, idx, last)
 		}
 		last = idx
+	}
+}
+
+// TestRenderSummary_DetailsWrapping pins the new
+// <details>/<summary> structure end-to-end. This is the
+// regression test for the rendering change that puts the
+// finding count in <summary> and the table inside <details>,
+// so the GitLab message defaults to a single click-to-expand
+// row instead of dumping the whole table into the MR's
+// activity feed.
+func TestRenderSummary_DetailsWrapping(t *testing.T) {
+	mr := &gitlab.MergeRequest{}
+	findings := []policy.EnforcedFinding{
+		{File: "a.go", Line: 1, Severity: policy.SeverityError, Category: "x", Body: "one", Verdict: policy.SeverityError},
+		{File: "b.go", Line: 2, Severity: policy.SeverityError, Category: "x", Body: "two", Verdict: policy.SeverityError},
+		{File: "c.go", Line: 3, Severity: policy.SeverityError, Category: "x", Body: "three", Verdict: policy.SeverityError},
+	}
+	out := renderSummary(mr, "", findings)
+
+	// Single <details> block that opens before the table and
+	// closes after it. Critical: no nested or stray
+	// <details>/</details>.
+	openCount := strings.Count(out, "<details>")
+	closeCount := strings.Count(out, "</details>")
+	if openCount != 1 {
+		t.Errorf("expected exactly 1 <details> open; got %d in:\n%s", openCount, out)
+	}
+	if closeCount != 1 {
+		t.Errorf("expected exactly 1 </details> close; got %d in:\n%s", closeCount, out)
+	}
+
+	// Summary line must carry the count.
+	if !strings.Contains(out, "<summary>Findings (3)</summary>") {
+		t.Errorf("summary must carry the count; got:\n%s", out)
+	}
+
+	// Ordering: <details> opens, summary follows, blank
+	// line, table, blank line, </details>. We assert the
+	// table sits BETWEEN the <summary> and </details>.
+	openIdx := strings.Index(out, "<details>")
+	summaryIdx := strings.Index(out, "<summary>Findings (3)</summary>")
+	tableIdx := strings.Index(out, "| Severity | File | Line | Category | Description |")
+	closeIdx := strings.Index(out, "</details>")
+	if !(openIdx < summaryIdx && summaryIdx < tableIdx && tableIdx < closeIdx) {
+		t.Errorf("ordering wrong: <details>=%d <summary>=%d <table>=%d </details>=%d\n%s",
+			openIdx, summaryIdx, tableIdx, closeIdx, out)
+	}
+
+	// The blank line between </summary> and the table is
+	// critical — without it, GitLab's markdown parser does
+	// not recognise the table block. Pin it explicitly.
+	if !strings.Contains(out, "</summary>\n\n| Severity |") {
+		t.Errorf("missing blank line between </summary> and the table header; got:\n%s", out)
 	}
 }

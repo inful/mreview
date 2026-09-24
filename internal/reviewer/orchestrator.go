@@ -591,6 +591,15 @@ func buildInlineComment(meta gitlab.ChangeFile, f Finding) gitlab.InlineComment 
 // inline `<br>` separators keep multi-line bodies readable
 // inside the cell.
 //
+// The whole table is wrapped in GitLab-Flavored Markdown's
+// <details> collapsible block, with the finding count in the
+// <summary>. Default GitLab rendering collapses the body of
+// the comment to a single click-to-expand row, which keeps
+// the human-readable summary at top without a long table
+// pushing it off-screen on MRs with many findings. Reviewers
+// who want the table click the summary; the summary itself
+// is always visible.
+//
 // Body escaping: pipe characters in the body would otherwise
 // terminate the table row; backslash-escape them. Newlines
 // inside bodies become `<br>` so each sentence keeps its
@@ -602,34 +611,43 @@ func renderSummary(mr *gitlab.MergeRequest, summary string, findings []policy.En
 		b.WriteString(summary)
 		b.WriteString("\n\n")
 	}
-	b.WriteString("## Findings\n\n")
+	// Wrap the findings in <details> so the table collapses
+	// by default. The blank line between <summary> and the
+	// table is required — GitLab's markdown parser only
+	// recognises a markdown table when it follows an empty
+	// line, even inside an HTML block.
+	fmt.Fprintf(&b, "<details>\n<summary>Findings (%d)</summary>\n\n", len(findings))
 	if len(findings) == 0 {
 		b.WriteString("No issues found.\n")
-		return b.String()
-	}
-	b.WriteString("| Severity | File | Line | Category | Description |\n")
-	b.WriteString("|----------|------|-----:|----------|-------------|\n")
-	for _, f := range findings {
-		emoji := "•"
-		switch policy.Severity(f.Verdict) {
-		case policy.SeverityError:
-			emoji = "🛑"
-		case policy.SeverityWarning:
-			emoji = "⚠️"
-		case policy.SeverityInfo:
-			emoji = "ℹ️"
+	} else {
+		b.WriteString("| Severity | File | Line | Category | Description |\n")
+		b.WriteString("|----------|------|-----:|----------|-------------|\n")
+		for _, f := range findings {
+			emoji := "•"
+			switch policy.Severity(f.Verdict) {
+			case policy.SeverityError:
+				emoji = "🛑"
+			case policy.SeverityWarning:
+				emoji = "⚠️"
+			case policy.SeverityInfo:
+				emoji = "ℹ️"
+			}
+			body := strings.TrimSpace(f.Body)
+			// Markdown tables render newlines as a literal space
+			// inside a cell; <br> is the documented GitLab-Flavored
+			// Markdown escape for an in-cell line break.
+			body = strings.ReplaceAll(body, "\r\n", "<br>")
+			body = strings.ReplaceAll(body, "\n", "<br>")
+			// Pipe would terminate the row; backslash-escape.
+			body = strings.ReplaceAll(body, "|", `\|`)
+			fmt.Fprintf(&b, "| %s %s | `%s` | %d | %s | %s |\n",
+				emoji, f.Verdict, f.File, f.Line, f.Category, body)
 		}
-		body := strings.TrimSpace(f.Body)
-		// Markdown tables render newlines as a literal space
-		// inside a cell; <br> is the documented GitLab-Flavored
-		// Markdown escape for an in-cell line break.
-		body = strings.ReplaceAll(body, "\r\n", "<br>")
-		body = strings.ReplaceAll(body, "\n", "<br>")
-		// Pipe would terminate the row; backslash-escape.
-		body = strings.ReplaceAll(body, "|", `\|`)
-		fmt.Fprintf(&b, "| %s %s | `%s` | %d | %s | %s |\n",
-			emoji, f.Verdict, f.File, f.Line, f.Category, body)
 	}
+	// Trailing blank line then </details> — same reason as
+	// the leading blank: GitLab's HTML/Markdown boundary
+	// rules want whitespace there.
+	b.WriteString("\n</details>\n")
 	return b.String()
 }
 
