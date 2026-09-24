@@ -88,6 +88,18 @@ type ReviewCmd struct {
 	Retries      int           `default:"3" name:"retries" env:"MREVIEW_RETRIES" help:"GitLab API retry attempts on transient errors."`
 	RetryBackoff time.Duration `default:"500ms" name:"retry-backoff" env:"MREVIEW_RETRY_BACKOFF" help:"Initial retry backoff; exponential with jitter."`
 
+	// MaxOutputTokens bounds each LLM generation request. The
+	// harness's default (when 0) is 8192 tokens; some local /
+	// routing models produce verbose chain-of-thought
+	// preambles that exhaust that budget before the model emits
+	// any tool call, surfacing as "model reached its output
+	// limit (8192 tokens) before finishing" and ending the run.
+	// 16384 leaves headroom for verbose models while staying
+	// well under flagship-provider output caps. Operators on a
+	// known-tight-budget model can lower this via the flag or
+	// MREVIEW_MAX_OUTPUT_TOKENS env var.
+	MaxOutputTokens int `default:"16384" name:"max-output-tokens" env:"MREVIEW_MAX_OUTPUT_TOKENS" help:"Per-generation max_tokens sent to the LLM provider. Default 16384; raise for verbose chain-of-thought models, lower to save cost on tight-budget models."`
+
 	// Per-event branching (issue #41 / migration step 1 of #42).
 	OnDrafts string `default:"skip" name:"on-drafts" enum:"run,skip" env:"MREVIEW_ON_DRAFTS" help:"Action on draft MRs (CI_MERGE_REQUEST_DRAFT=true): run the review or skip with exit 0. Default skip."`
 	OnPush   string `default:"skip" name:"on-push" enum:"run,skip" env:"MREVIEW_ON_PUSH" help:"Action on direct branch pushes (CI_PIPELINE_SOURCE=push): run the review or skip with exit 0. Default skip."`
@@ -270,6 +282,7 @@ func runReview(parentCtx context.Context, stdout io.Writer, c *ReviewCmd, cfg *c
 		DebugLLM:         c.DebugLLM,
 		Retries:          c.Retries,
 		RetryBackoff:     c.RetryBackoff,
+		MaxOutputTokens:  c.MaxOutputTokens,
 		TokensaveEnabled: c.TokensaveEnabled,
 		TokensaveBin:     c.TokensaveBin,
 		Artifacts:        artifactSet,

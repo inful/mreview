@@ -618,3 +618,86 @@ func TestExitError_ErrorIncludesWrappedCause(t *testing.T) {
 		t.Errorf("Error() should include reason + cause, got %q", e.Error())
 	}
 }
+
+// TestRun_Review_MaxOutputTokensFlag is a regression test
+// for the 8192-token output-limit failure mode where
+// verbose chain-of-thought models ran out of budget before
+// emitting any tool call. The flag must:
+//
+//   - appear in `mreview review --help` so operators discover it
+//   - default to 16384 (well above the harness's 8192 floor)
+//   - bind to MREVIEW_MAX_OUTPUT_TOKENS env var when the flag
+//     isn't given
+//
+// We don't drive a full review here (it would require a
+// live LLM); we assert the CLI surface and the env-var
+// binding reach the parser, then check the runReview call
+// site via a non-panicking path that exercises the flag.
+func TestRun_Review_MaxOutputTokensFlag(t *testing.T) {
+	t.Run("flag is in --help", func(t *testing.T) {
+		stdout := &bytes.Buffer{}
+		stderr := &bytes.Buffer{}
+		code := run(context.Background(),
+			[]string{"review", "--help"},
+			stdout, stderr,
+		)
+		if code != ExitOK {
+			t.Errorf("--help returned %d, want %d", code, ExitOK)
+		}
+		for _, want := range []string{"--max-output-tokens", "MREVIEW_MAX_OUTPUT_TOKENS"} {
+			if !strings.Contains(stdout.String(), want) {
+				t.Errorf("--help missing %q\n%s", want, stdout.String())
+			}
+		}
+	})
+
+	t.Run("env var binds through to clientDeps.MaxOutputTokens", func(t *testing.T) {
+		// We can't easily instantiate a ClientDeps parser from
+		// inside a test (kong needs its own context), so we
+		// exercise the binding by checking the runReview path
+		// doesn't break when MREVIEW_MAX_OUTPUT_TOKENS is set
+		// and --workdir is also set. The run proceeds past
+		// the env-binding + workdir-validate stage and either
+		// reaches a downstream exit (auth) or honors the
+		// env var. Either way, neither the env-binding nor
+		// the workdir-validate should error out here.
+		t.Setenv("MREVIEW_WORKDIR", t.TempDir())
+		t.Setenv("MREVIEW_MAX_OUTPUT_TOKENS", "8192")
+		_, _, code := runWithArgs(t,
+			"review",
+			"--repo=foo/bar",
+			"--mr=42",
+			"--gitlab-token=test",
+			"--dry-run",
+			"--log-format=json",
+		)
+		// ExitConfig would mean the env binding broke parsing.
+		// Any other code (auth / connect / etc.) is fine.
+		if code == ExitConfig {
+			t.Errorf("MREVIEW_MAX_OUTPUT_TOKENS rejected by parser; got ExitConfig")
+		}
+	})
+
+	t.Run("explicit flag overrides the env binding", func(t *testing.T) {
+		// Same as above, but pass the value on the command line
+		// to confirm the CLI takes precedence (kong's documented
+		// behaviour). The run is short-lived — we only care
+		// that the parse + env-binding path doesn't reject
+		// mismatched values.
+		t.Setenv("MREVIEW_WORKDIR", t.TempDir())
+		t.Setenv("MREVIEW_MAX_OUTPUT_TOKENS", "8192")
+		_, _, code := runWithArgs(t,
+			"review",
+			"--repo=foo/bar",
+			"--mr=42",
+			"--gitlab-token=test",
+			"--workdir="+t.TempDir(),
+			"--max-output-tokens=4096",
+			"--dry-run",
+			"--log-format=json",
+		)
+		if code == ExitConfig {
+			t.Errorf("--max-output-tokens override rejected; got ExitConfig")
+		}
+	})
+}

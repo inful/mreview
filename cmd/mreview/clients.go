@@ -52,6 +52,16 @@ type clientDeps struct {
 	Retries      int
 	RetryBackoff time.Duration
 
+	// MaxOutputTokens sets the per-generation max_tokens sent
+	// to the LLM provider (see harness output_tokens.go: 0 →
+	// 8192 default; non-zero value is forwarded verbatim).
+	// Bound on the agent's chain-of-thought + first-answer
+	// output before any tool call. The CLI flag defaults to
+	// 16384; operators on a tight-budget model can lower this
+	// to save cost, and verbose chain-of-thought models need
+	// at least ~16K to clear their preamble.
+	MaxOutputTokens int
+
 	// Tokensave MCP integration (issue #42 step 4). When
 	// TokensaveEnabled is true (the default), the orchestrator
 	// spawns the tokensave subprocess and registers its tools
@@ -177,12 +187,13 @@ func buildHarnessRuntime(ctx context.Context, llmProvider llm.LLMProvider, deps 
 	// tool namespacing + subprocess lifecycle (Runtime.Close
 	// releases it).
 	spec := runtime.AgentSpec{
-		ID:           "mreview",
-		Name:         "mreview",
-		Model:        deps.Model,
-		Workspace:    deps.WorkDir,
-		SystemPrompt: prompts.ReviewSystemPrompt(),
-		MaxTurns:     10,
+		ID:              "mreview",
+		Name:            "mreview",
+		Model:           deps.Model,
+		Workspace:       deps.WorkDir,
+		SystemPrompt:    prompts.ReviewSystemPrompt(),
+		MaxTurns:        10,
+		MaxOutputTokens: deps.MaxOutputTokens,
 	}
 	if deps.TokensaveEnabled {
 		spec.MCPServers = []mcpServerConfig{
