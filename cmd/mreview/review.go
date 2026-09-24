@@ -56,6 +56,16 @@ type ReviewCmd struct {
 	// Dry-run.
 	DryRun bool `name:"dry-run" help:"Log the intended GitLab posts without performing them."`
 
+	// DebugLLM prints the raw response from the LLM (before
+	// the orchestrator parses it into findings) to stderr.
+	// Useful when a review fails parse and you want to see
+	// exactly what the model emitted vs. what the parser
+	// expected — distinct from --dry-run (which suppresses
+	// GitLab side-effects) and from --verbose (which raises
+	// the slog level; this writes the full raw text to
+	// stderr regardless of log level). Off by default.
+	DebugLLM bool `name:"debug-llm" help:"Print the raw LLM response to stderr for debugging. Default false."`
+
 	// Retry for GitLab API calls.
 	Retries      int           `default:"3" name:"retries" env:"MREVIEW_RETRIES" help:"GitLab API retry attempts on transient errors."`
 	RetryBackoff time.Duration `default:"500ms" name:"retry-backoff" env:"MREVIEW_RETRY_BACKOFF" help:"Initial retry backoff; exponential with jitter."`
@@ -220,6 +230,7 @@ func runReview(parentCtx context.Context, stdout io.Writer, c *ReviewCmd, cfg *c
 		Policy:           pol,
 		BotUsername:      c.BotUsername,
 		DryRun:           c.DryRun,
+		DebugLLM:         c.DebugLLM,
 		Retries:          c.Retries,
 		RetryBackoff:     c.RetryBackoff,
 		TokensaveEnabled: c.TokensaveEnabled,

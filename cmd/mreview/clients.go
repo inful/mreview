@@ -66,6 +66,12 @@ type clientDeps struct {
 	// artifacts configured.
 	Artifacts *artifact.Set
 
+	// DebugLLM forwards --debug-llm. When true, the
+	// orchestrator prints the raw LLM response to stderr
+	// before parsing — useful when a review fails because the
+	// model emitted text the JSON parser didn't expect.
+	DebugLLM bool
+
 	Logger *slog.Logger
 }
 
@@ -115,6 +121,7 @@ func buildReviewer(ctx context.Context, deps clientDeps) (*reviewer.Orchestrator
 		BotUsername: deps.BotUsername,
 		DryRun:      deps.DryRun,
 		Artifacts:   deps.Artifacts,
+		DebugLLM:    deps.DebugLLM,
 		Logger:      deps.Logger,
 	})
 	if err != nil {

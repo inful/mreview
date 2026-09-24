@@ -30,6 +30,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"strings"
 
 	"github.com/inful/mreview/internal/ci/artifact"
@@ -107,6 +108,15 @@ type Config struct {
 	// case so the agent knows the artifacts are absent
 	// rather than just missing.
 	Artifacts *artifact.Set
+
+	// DebugLLM, when true, prints the raw response from the
+	// LLM (the text RunSync returns, before
+	// ParseReviewResponse) to stderr with a clear separator.
+	// Independent of --dry-run (which suppresses GitLab
+	// side-effects) and --verbose (which raises the slog
+	// level; DebugLLM writes raw bytes straight to stderr so
+	// multi-line responses stay readable). False by default.
+	DebugLLM bool
 
 	Logger *slog.Logger
 }
@@ -219,6 +229,22 @@ func (o *Orchestrator) Run(ctx context.Context, project string, iid int, action 
 	raw, err := o.cfg.Runner.RunSync(ctx, prompts.ReviewSystemPrompt(), userPrompt)
 	if err != nil {
 		return nil, fmt.Errorf("orchestrator: runner: %w", err)
+	}
+
+	// Optional: dump the raw LLM response to stderr so an
+	// operator can see exactly what the model emitted when
+	// the parser rejects it. Independent of the slog level
+	// (this is meant for raw bytes, not structured logging)
+	// and of --dry-run (which suppresses downstream effects).
+	if o.cfg.DebugLLM {
+		body := raw
+		if body == "" {
+			body = "(empty response)"
+		}
+		fmt.Fprintf(os.Stderr,
+			"\n=== mreview --debug-llm: raw LLM response (mr=%d, %d bytes) ===\n%s\n=== end --debug-llm ===\n",
+			mr.IID, len(raw), body,
+		)
 	}
 
 	// Parse the response.
