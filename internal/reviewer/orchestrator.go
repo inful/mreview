@@ -240,6 +240,30 @@ func (o *Orchestrator) Run(ctx context.Context, project string, iid int, action 
 				"remediation", fmt.Sprintf("git -C %s checkout %s", o.cfg.WorkDir, mr.SourceBranch),
 			)
 		}
+
+		// Pre-track the MR's source branch in tokensave.
+		// Without this, every tokensave tool call appends
+		// "WARNING: branch 'X' is not tracked — serving from
+		// 'Y'" to its response, which is ~150 chars of
+		// pure noise per call. Across a 6-call review
+		// that's ~900 tokens eaten out of every per-call
+		// output budget. tokensave's `branch add` is
+		// idempotent (re-tracking is a no-op incremental
+		// sync), so doing this on every run is cheap.
+		// Failure modes degrade gracefully to a debug log
+		// (see internal/git for the sentinel errors).
+		if terr := git.EnsureBranchTracked(o.cfg.WorkDir, mr.SourceBranch); terr != nil {
+			switch {
+			case errors.Is(terr, git.ErrNoTokensave):
+				logger.Debug("tokensave branch pre-track skipped: tokensave not on PATH")
+			default:
+				logger.Debug("tokensave branch pre-track failed",
+					"workdir", o.cfg.WorkDir,
+					"branch", mr.SourceBranch,
+					"err", terr.Error(),
+				)
+			}
+		}
 	}
 
 	changes, err := o.cfg.GitLab.FetchChanges(ctx, project, iid)

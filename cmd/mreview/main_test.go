@@ -701,3 +701,63 @@ func TestRun_Review_MaxOutputTokensFlag(t *testing.T) {
 		}
 	})
 }
+
+// TestRun_Review_MaxTurnsFlag pins the discovery and
+// binding contract for the --max-turns flag, added when
+// verbose models accumulated enough per-turn text that
+// 10 turns × N tokens exceeded the output budget before
+// the agent converged. The flag was lowered to 6 by
+// default — this test confirms (1) help exposure, (2) env
+// binding, and (3) CLI override.
+func TestRun_Review_MaxTurnsFlag(t *testing.T) {
+	t.Run("flag is in --help", func(t *testing.T) {
+		stdout := &bytes.Buffer{}
+		stderr := &bytes.Buffer{}
+		code := run(context.Background(),
+			[]string{"review", "--help"},
+			stdout, stderr,
+		)
+		if code != ExitOK {
+			t.Errorf("--help returned %d, want %d", code, ExitOK)
+		}
+		for _, want := range []string{"--max-turns", "MREVIEW_MAX_TURNS"} {
+			if !strings.Contains(stdout.String(), want) {
+				t.Errorf("--help missing %q\n%s", want, stdout.String())
+			}
+		}
+	})
+
+	t.Run("env var binds through the parser", func(t *testing.T) {
+		t.Setenv("MREVIEW_WORKDIR", t.TempDir())
+		t.Setenv("MREVIEW_MAX_TURNS", "8")
+		_, _, code := runWithArgs(t,
+			"review",
+			"--repo=foo/bar",
+			"--mr=42",
+			"--gitlab-token=test",
+			"--dry-run",
+			"--log-format=json",
+		)
+		if code == ExitConfig {
+			t.Errorf("MREVIEW_MAX_TURNS rejected by parser; got ExitConfig")
+		}
+	})
+
+	t.Run("explicit flag overrides the env binding", func(t *testing.T) {
+		t.Setenv("MREVIEW_WORKDIR", t.TempDir())
+		t.Setenv("MREVIEW_MAX_TURNS", "8")
+		_, _, code := runWithArgs(t,
+			"review",
+			"--repo=foo/bar",
+			"--mr=42",
+			"--gitlab-token=test",
+			"--workdir="+t.TempDir(),
+			"--max-turns=4",
+			"--dry-run",
+			"--log-format=json",
+		)
+		if code == ExitConfig {
+			t.Errorf("--max-turns override rejected; got ExitConfig")
+		}
+	})
+}

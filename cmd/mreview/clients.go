@@ -62,6 +62,12 @@ type clientDeps struct {
 	// at least ~16K to clear their preamble.
 	MaxOutputTokens int
 
+	// MaxTurns caps the agent's tool-use loop. The harness
+	// default (when 0) is 25 — mreview's previous hard-coded
+	// value was 10. The CLI flag defaults to 6; raised to
+	// 10+ only when the MR is unusually complex.
+	MaxTurns int
+
 	// Tokensave MCP integration (issue #42 step 4). When
 	// TokensaveEnabled is true (the default), the orchestrator
 	// spawns the tokensave subprocess and registers its tools
@@ -192,7 +198,7 @@ func buildHarnessRuntime(ctx context.Context, llmProvider llm.LLMProvider, deps 
 		Model:           deps.Model,
 		Workspace:       deps.WorkDir,
 		SystemPrompt:    prompts.ReviewSystemPrompt(),
-		MaxTurns:        10,
+		MaxTurns:        deps.MaxTurns,
 		MaxOutputTokens: deps.MaxOutputTokens,
 	}
 	if deps.TokensaveEnabled {

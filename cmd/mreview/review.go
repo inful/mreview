@@ -100,6 +100,18 @@ type ReviewCmd struct {
 	// MREVIEW_MAX_OUTPUT_TOKENS env var.
 	MaxOutputTokens int `default:"16384" name:"max-output-tokens" env:"MREVIEW_MAX_OUTPUT_TOKENS" help:"Per-generation max_tokens sent to the LLM provider. Default 16384; raise for verbose chain-of-thought models, lower to save cost on tight-budget models."`
 
+	// MaxTurns caps the agent's tool-use loop. The harness
+	// default (when 0) is 25; mreview's previous hard-coded
+	// value (10) was generous but verbosity across turns
+	// can compound quickly with a chatty model. 6 gives the
+	// agent enough rounds to (1) explore the tokensave
+	// index, (2) read 2-3 of the MR's changed files, and
+	// (3) emit the final JSON — past that, the runs we
+	// observed tended to thrash on the same queries. Operators
+	// on a model that needs more room can raise it; lower
+	// for tight-budget models that emit a lot per turn.
+	MaxTurns int `default:"6" name:"max-turns" env:"MREVIEW_MAX_TURNS" help:"Cap on the agent's tool-use loop. Default 6; raise for complex MRs, lower for tight-budget models that emit more per turn."`
+
 	// Per-event branching (issue #41 / migration step 1 of #42).
 	OnDrafts string `default:"skip" name:"on-drafts" enum:"run,skip" env:"MREVIEW_ON_DRAFTS" help:"Action on draft MRs (CI_MERGE_REQUEST_DRAFT=true): run the review or skip with exit 0. Default skip."`
 	OnPush   string `default:"skip" name:"on-push" enum:"run,skip" env:"MREVIEW_ON_PUSH" help:"Action on direct branch pushes (CI_PIPELINE_SOURCE=push): run the review or skip with exit 0. Default skip."`
@@ -283,6 +295,7 @@ func runReview(parentCtx context.Context, stdout io.Writer, c *ReviewCmd, cfg *c
 		Retries:          c.Retries,
 		RetryBackoff:     c.RetryBackoff,
 		MaxOutputTokens:  c.MaxOutputTokens,
+		MaxTurns:         c.MaxTurns,
 		TokensaveEnabled: c.TokensaveEnabled,
 		TokensaveBin:     c.TokensaveBin,
 		Artifacts:        artifactSet,
