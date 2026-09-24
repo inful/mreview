@@ -35,6 +35,7 @@ import (
 
 	"github.com/inful/mreview/internal/ci/artifact"
 	"github.com/inful/mreview/internal/diff"
+	"github.com/inful/mreview/internal/git"
 	"github.com/inful/mreview/internal/gitlab"
 	"github.com/inful/mreview/internal/policy"
 	"github.com/inful/mreview/internal/prompts"
@@ -184,6 +185,62 @@ func (o *Orchestrator) Run(ctx context.Context, project string, iid int, action 
 		return nil, fmt.Errorf("orchestrator: fetch MR: %w", err)
 	}
 	logger.Info("fetched MR", "title", mr.Title, "state", mr.State)
+
+	// Branch sanity-check: if the workdir is checked out on a
+	// different branch than the MR's source branch, tokensave
+	// will index (and serve) the wrong tree. The agent's
+	// tokensave_context / tokensave_search / tokensave_read
+	// calls will then return data from a different revision
+	// than the diff it's reviewing — the agent can't reconcile,
+	// retries, and burns the 8192-token output budget. This
+	// mismatch is easy to hit in local dev where the operator
+	// forgets to checkout the MR's source branch; in CI, the
+	// central pipeline checks out the MR branch before
+	// invoking mreview, so the mismatch is rare but possible
+	// (e.g. when reused workdirs from earlier runs survive).
+	//
+	// The check shells out to `git`. The distroless image does
+	// NOT bundle a git binary, so the helper returns
+	// ErrNoGit and we degrade silently to a debug-log; this
+	// matches the build's "no extra binaries in the runtime
+	// image" stance. Local dev (where git is on PATH) gets
+	// the loud WARN that's actually useful.
+	//
+	// We intentionally DO NOT auto-checkout. Run-time git
+	// mutation from a code-review CLI is surprising, can
+	// destroy uncommitted work, and would force the operator
+	// to trust our run-script hygiene. The fix is one shell
+	// line for the operator.
+	if o.cfg.WorkDir != "" && mr.SourceBranch != "" {
+		wcur, werr := git.CurrentBranch(o.cfg.WorkDir)
+		switch {
+		case errors.Is(werr, git.ErrNoGit):
+			logger.Debug("skipping branch check: git not on PATH (CI / distroless)")
+		case errors.Is(werr, git.ErrNotARepo):
+			logger.Debug("skipping branch check: workdir is not a git repository",
+				"workdir", o.cfg.WorkDir,
+			)
+		case werr != nil:
+			logger.Debug("branch check failed",
+				"workdir", o.cfg.WorkDir,
+				"err", werr.Error(),
+			)
+		case wcur == "":
+			// Detached HEAD or uncommitted state — not a
+			// "branch mismatch"; leave the operator alone.
+			logger.Debug("workdir has no current branch (detached HEAD?)",
+				"workdir", o.cfg.WorkDir,
+			)
+		case wcur != mr.SourceBranch:
+			logger.Warn("workdir branch does not match MR source branch — tokensave will index and serve the wrong tree",
+				"workdir", o.cfg.WorkDir,
+				"workdir_branch", wcur,
+				"mr_source_branch", mr.SourceBranch,
+				"reason", "tokensave serve defaults to the workdir's checked-out branch; running the review against the wrong tree makes the agent's tokensave_* calls return data from a different revision than the diff",
+				"remediation", fmt.Sprintf("git -C %s checkout %s", o.cfg.WorkDir, mr.SourceBranch),
+			)
+		}
+	}
 
 	changes, err := o.cfg.GitLab.FetchChanges(ctx, project, iid)
 	if err != nil {
