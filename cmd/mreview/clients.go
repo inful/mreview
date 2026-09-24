@@ -9,6 +9,7 @@ import (
 
 	"github.com/sausheong/harness/llm"
 	"github.com/sausheong/harness/runtime"
+	"github.com/sausheong/harness/session"
 	"github.com/sausheong/harness/tool"
 	"github.com/sausheong/harness/tools/file"
 	"github.com/sausheong/harness/tools/mcp"
@@ -158,11 +159,22 @@ func buildHarnessRuntime(ctx context.Context, llmProvider llm.LLMProvider, deps 
 		}
 	}
 
+	// Session is required: runtime.Run unconditionally calls
+	// r.Session.Append / r.Session.AppendContext on the first
+	// user message (harness runtime/runtime.go:441), and a nil
+	// Session panics there. The deferred recover at runtime.go:404
+	// turns it into a "runtime panicked: invalid memory address
+	// or nil pointer dereference" error wrapping RunSync — so the
+	// failure mode is opaque without this wiring. One fresh
+	// in-memory session per mreview invocation is correct: the
+	// runtime is rebuilt per CLI run and there is no
+	// cross-invocation history to preserve on the review path.
 	return runtime.BuildRuntime(
 		runtime.RuntimeDeps{},
 		runtime.RuntimeInputs{
 			Provider: llmProvider,
 			Tools:    reg,
+			Session:  session.NewSession(spec.ID, "review"),
 		},
 		spec,
 	)
