@@ -122,9 +122,18 @@ tokensave-sync:
 # itself, not in the YAML's `rules:`. The YAML's rules filter
 # when mreview is invoked; mreview's internal guard handles
 # the rest. See README → "Behaviour by event".
+#
+# Image selection: use the *-debug variant here. The production
+# image (:latest) is distroless + no shell, which GitLab Runner
+# needs to execute the script: block. The debug variant
+# (:latest-debug) carries a busybox binary at /usr/bin/sh (so
+# /bin/sh resolves to a working shell) and adds /usr/local/bin
+# to PATH with mreview on it — so the script: block below runs
+# `mreview review ...` directly, with no path prefix needed. See
+# README → "Configuration".
 mreview:
   stage: review
-  image: ghcr.io/inful/mreview:latest
+  image: ghcr.io/inful/mreview:latest-debug
   variables:
     LLM_URL: http://localhost:11434/v1
     LLM_MODEL: qwen2.5-coder:7b

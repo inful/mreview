@@ -816,6 +816,19 @@ invocation. The onboarding pattern is:
    `.gitlab-ci.yml` — e.g. `MREVIEW_PROVIDER_BASE_URL` if the
    org's LLM proxy lives at a non-default URL.
 
+### Choosing an image
+
+Two image variants ship with every release:
+
+| Tag | Base | Shell | Use for |
+|---|---|---|---|
+| `:X.Y.Z` / `:latest` | `distroless/cc:nonroot` | none | Running mreview directly (`docker run`, Kubernetes pods, ECS tasks). Smaller attack surface. |
+| `:X.Y.Z-debug` / `:latest-debug` | `distroless/cc:debug-nonroot` | busybox + `/bin/sh` symlink | **GitLab CI, GitHub Actions, or any runner that needs a shell to invoke `script:` blocks.** Also useful for `docker exec -it` debugging. |
+
+Use the `-debug` variant in `image:` for CI jobs. The production variant's lack of a shell means GitLab Runner fails on `script:` blocks with `exec: "/bin/sh": not found` — confirmed by a real test against `ghcr.io/inful/mreview:0.9.0` during v0.9.1. Pin by tag for reproducibility (`:X.Y.Z-debug`) or track `:latest-debug` for auto-updates.
+
+The two variants share the same ENTRYPOINT (`["/mreview"]`) and the same OCI labels; only the shell availability differs.
+
 This pattern is what "the central CI definition handles
 onboarding" means in the locked decisions table. mreview
 ships `examples/central-ci.yml` as the *reference template*;

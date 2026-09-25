@@ -53,12 +53,46 @@ RUN apk add --no-cache curl \
     chmod 0755 /out/tokensave; \
     test -x /out/tokensave
 
+# Stage 1.5: extract the glibc-compatible busybox from the distroless
+# base image itself. The alpine-based tokensave stage above has
+# busybox too, but it's dynamically linked against musl; copying
+# that binary into a glibc-based runtime fails exec with
+# "/lib/ld-musl-x86_64.so.1: not found". The busybox that ships
+# in cc:debug-nonroot is statically linked and glibc-clean, so we
+# use it instead.
+#
+# Why a dedicated stage: COPY --from=<external-image> isn't
+# supported in BuildKit; we have to declare an explicit FROM
+# stage. Using the same image twice is fine — Docker pulls once
+# and the second FROM reuses the cache.
+FROM gcr.io/distroless/cc:debug-nonroot AS busybox-source
+
 # Stage 2: distroless debug runtime (busybox shell + glibc + libgcc).
 FROM gcr.io/distroless/cc:debug-nonroot AS runtime
 
 ARG TARGETPLATFORM
 COPY --chown=65532:65532 ${TARGETPLATFORM}/mreview /mreview
 COPY --from=tokensave --chown=65532:65532 /out/tokensave /usr/local/bin/tokensave
+
+# /bin/sh is required by GitLab Runner (and other CI runners) to
+# invoke script: blocks. distroless cc:debug-nonroot ships busybox
+# only at /busybox/ — there's no /bin/sh and /usr/bin is read-only,
+# so an in-Dockerfile symlink won't stick. Add a real shell binary
+# at /usr/bin/sh; the base image's /bin -> usr/bin symlink makes
+# /bin/sh resolve transparently.
+#
+# Source: busybox from the distroless base image (busybox-source
+# stage). Statically linked; glibc-clean. When invoked with
+# argv[0]="sh" the busybox binary dispatches to the shell
+# builtin.
+COPY --from=busybox-source /busybox/busybox /usr/bin/sh
+
+# Also put mreview on PATH so script: blocks can use `mreview
+# review ...` (the standard GitLab CI convention) instead of
+# needing /mreview explicitly. The ENTRYPOINT still uses the
+# absolute /mreview path; PATH only affects how the shell
+# resolves bare command names.
+COPY --chown=65532:65532 ${TARGETPLATFORM}/mreview /usr/local/bin/mreview
 
 # Same entrypoint as the production image — debug differs only by
 # having a shell available for exec.
