@@ -27,7 +27,7 @@ func TestRun_Review_PolicyFile_InvalidYAML_ExitsConfig(t *testing.T) {
 			"--repo=foo/bar",
 			"--mr=42",
 			"--gitlab-token=test",
-			"--workdir="+t.TempDir(),
+			"--workdir=" + t.TempDir(),
 			"--policy-file=" + policyPath,
 			"--log-format=json",
 		},
@@ -53,7 +53,7 @@ func TestRun_Review_PolicyFile_UnknownField_ExitsConfig(t *testing.T) {
 		t.Fatalf("write: %v", err)
 	}
 
-stdout := &bytes.Buffer{}
+	stdout := &bytes.Buffer{}
 	stderr := &bytes.Buffer{}
 	run(context.Background(),
 		[]string{
@@ -61,7 +61,7 @@ stdout := &bytes.Buffer{}
 			"--repo=foo/bar",
 			"--mr=42",
 			"--gitlab-token=test",
-			"--workdir="+t.TempDir(),
+			"--workdir=" + t.TempDir(),
 			"--policy-file=" + policyPath,
 			"--log-format=json",
 		},
@@ -83,7 +83,7 @@ func TestRun_Review_PolicyFile_MissingFile_ExitsConfig(t *testing.T) {
 			"--repo=foo/bar",
 			"--mr=42",
 			"--gitlab-token=test",
-			"--workdir="+t.TempDir(),
+			"--workdir=" + t.TempDir(),
 			"--policy-file=/nonexistent/policy.yaml",
 			"--log-format=json",
 		},
@@ -133,7 +133,7 @@ labels:
 			"--repo=foo/bar",
 			"--mr=42",
 			"--gitlab-token=test",
-			"--workdir="+t.TempDir(),
+			"--workdir=" + t.TempDir(),
 			"--policy-file=" + policyPath,
 			"--log-format=json",
 		},
@@ -174,7 +174,7 @@ func TestRun_Review_PolicyFile_EmptyFile_OK(t *testing.T) {
 			"--repo=foo/bar",
 			"--mr=42",
 			"--gitlab-token=test",
-			"--workdir="+t.TempDir(),
+			"--workdir=" + t.TempDir(),
 			"--policy-file=" + policyPath,
 			"--log-format=json",
 		},
@@ -201,7 +201,7 @@ func TestRun_Review_NoPolicyFile_Proceeds(t *testing.T) {
 			"--repo=foo/bar",
 			"--mr=42",
 			"--gitlab-token=test",
-			"--workdir="+t.TempDir(),
+			"--workdir=" + t.TempDir(),
 			"--log-format=json",
 		},
 		stdout, stderr,

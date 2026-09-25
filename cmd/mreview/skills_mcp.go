@@ -10,6 +10,7 @@ import (
 
 	"github.com/inful/mreview/internal/gitlab"
 	"github.com/inful/mreview/internal/skills"
+	"github.com/inful/mreview/internal/skills/bundled"
 	skillsmcp "github.com/inful/mreview/internal/skills/mcp"
 )
 
@@ -82,13 +83,42 @@ func runSkillsMCP(parentCtx context.Context, _ io.Writer, c *SkillsMCPCmd, logge
 		return &ExitError{Code: ExitConfig, Reason: "skills-mcp: build gitlab client", Wrapped: err}
 	}
 
-	loader := skills.New(glClient, c.RepoPath, c.Directory, c.Ref, logger)
+	loader := skills.New(skills.Config{
+		Fetcher:   glClient,
+		RepoPath:  c.RepoPath,
+		Directory: c.Directory,
+		Ref:       c.Ref,
+		// Bundled skills are the always-on baseline. The
+		// embedded FS ships with every release; remote wins
+		// on name collision, so a team can override any of
+		// these by putting a same-named .md in their central
+		// repo (issue #44).
+		Bundled: loadBundledOrLog(logger),
+		Logger:  logger,
+	})
 
 	if err := skillsmcp.Serve(parentCtx, loader); err != nil && !errors.Is(err, context.Canceled) {
 		return &ExitError{Code: ExitInternal, Reason: "skills-mcp: serve", Wrapped: err}
 	}
 	logger.Info("skills MCP server stopped", "repo", c.RepoPath)
 	return nil
+}
+
+// loadBundledOrLog materialises the embedded bundled skill
+// files into a {name: body} map. Failures here are build-time
+// bugs (broken embedded FS), but log a warning and return an
+// empty map so the subprocess still starts. The agent will
+// see a warning in mreview's stderr logs and no bundled skills
+// in list_skills output — degraded, but not crashed.
+func loadBundledOrLog(logger *slog.Logger) map[string][]byte {
+	out, err := skills.LoadBundled(bundled.FS())
+	if err != nil {
+		logger.Warn("skills: failed to load bundled skill files",
+			"err", err.Error(),
+		)
+		return map[string][]byte{}
+	}
+	return out
 }
 
 // compile-time check that the error helper still imports fmt.

@@ -275,7 +275,7 @@ provider:
 			"--repo=foo/bar",
 			"--mr=42",
 			"--gitlab-token=test",
-			"--workdir="+t.TempDir(),
+			"--workdir=" + t.TempDir(),
 			"--model=cli-model:7b", // override
 			"--log-format=json",
 		}, stdout, stderr,
