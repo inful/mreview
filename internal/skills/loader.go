@@ -1,33 +1,39 @@
-// Package skills loads review guidance (.md files) from a shared
-// GitLab repository's skills/ directory. The loader is the
-// application layer on top of the gitlab repository-files transport
-// (internal/gitlab/repository_files.go) and the source of truth for
-// the skills MCP server (internal/skills/mcp).
+// Package skills loads review guidance (.md files) from two
+// sources and merges them into a single skill set the review
+// agent can browse via the skills MCP server.
+//
+// Sources (issue #44):
+//
+//  1. Bundled — a fixed set of .md files embedded in the mreview
+//     binary (see internal/skills/bundled/). These ship with
+//     every release so the agent has useful defaults regardless
+//     of operator configuration.
+//
+//  2. Remote — a directory of .md files in a GitLab repository
+//     (the "central skills repo"). Configured via --skills-repo.
+//
+// Override semantics: remote wins on Name collision. A team can
+// patch any bundled skill by putting a same-named .md in their
+// central repo — no fork of mreview required. This mirrors how
+// /etc overrides /etc/skel and how config files override
+// package defaults.
+//
+// Graceful degradation: if the remote fetch fails (list error,
+// network outage), the loader logs a warning and falls back to
+// the bundled set. The agent never sees an empty skill list
+// when bundled skills exist.
 //
 // One Loader is built per mreview invocation. Loader discovers
-// every .md blob in <repo>/<directory> at <ref>, fetches its body,
-// extracts a one-paragraph description, and caches the result for
-// the rest of the run. The agent reads the cache via the MCP
-// server's list_skills / read_skill tools.
-//
-// Design choices:
-//   - Filtering happens at Load: only blobs whose Name ends in
-//     ".md" become Skills. Trees (subdirectories) and non-markdown
-//     files are silently skipped — the agent never sees them.
-//   - Description extraction is bounded (200 chars) so list_skills
-//     output stays compact regardless of skill size. Long
-//     descriptions belong in the skill body.
-//   - One failed file does not fail Load. The error is logged at
-//     WARN and the file is skipped; the agent gets the rest.
-//   - The cache is process-lifetime. Refreshing across runs is
-//     handled by mreview being rebuilt per CLI invocation — no
-//     in-process invalidation needed.
+// skills once via Load, caches them, and serves subsequent
+// Read calls from the cache. The agent reaches the cache via
+// the MCP server's list_skills / read_skill tools.
 package skills
 
 import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"path/filepath"
 	"strings"
@@ -45,17 +51,24 @@ var ErrSkillNotFound = errors.New("skills: not found")
 // Keeps list_skills output compact regardless of skill size.
 const descriptionCap = 200
 
-// Skill is one .md file under <repo>/<directory>/.
+// bundledPathPrefix marks the Path field on bundled Skills so
+// callers can tell at a glance where the skill came from.
+// Remote skills use their repo-relative path; bundled use
+// "bundled://<name>.md".
+const bundledPathPrefix = "bundled://"
+
+// Skill is one merged skill (bundled or remote).
 type Skill struct {
 	// Name is the filename without the directory prefix and the
 	// .md extension (e.g. "go-review"). It's the agent's handle
 	// for read_skill.
 	Name string
 
-	// Path is the repo-relative path the GitLab tree API
-	// returned (e.g. "skills/go-review.md"). Useful for
-	// provenance logging and for read_skill clients that want
-	// to display the source location.
+	// Path is the source path. For remote skills: the
+	// repo-relative path the GitLab tree API returned (e.g.
+	// "skills/go-review.md"). For bundled skills: a
+	// "bundled://<name>.md" sentinel. Useful for provenance
+	// logging and list_skills output.
 	Path string
 
 	// Description is the first non-empty paragraph of the body,
@@ -64,8 +77,9 @@ type Skill struct {
 	// without paying the body bytes.
 	Description string
 
-	// SHA is the GitLab blob ID. Carried for cache-invalidation
-	// possibilities; unused by the loader today.
+	// SHA is the GitLab blob ID for remote skills. Empty for
+	// bundled skills (no version identity beyond the binary
+	// release that shipped them).
 	SHA string
 
 	// Body is the raw markdown bytes. Returned verbatim by
@@ -74,19 +88,56 @@ type Skill struct {
 	Body []byte
 }
 
-// SkillFetcher is the transport-side dependency. Satisfied by
-// *gitlab.Client; fakes drive unit tests.
-//
-// The interface deliberately mirrors the two methods the existing
-// repository-files transport exposes, so production wiring is a
-// one-liner (`skills.New(glClient, ...)`) and tests don't need a
-// real GitLab.
+// IsBundled reports whether the skill came from the embedded
+// set rather than the central repo. Useful for list_skills
+// output and operator logging.
+func (s Skill) IsBundled() bool {
+	return strings.HasPrefix(s.Path, bundledPathPrefix)
+}
+
+// SkillFetcher is the transport-side dependency for remote
+// skills. Satisfied by *gitlab.Client; fakes drive unit tests.
 type SkillFetcher interface {
 	ListRepositoryTree(ctx context.Context, project, path, ref string) ([]gitlab.TreeNode, error)
 	GetRepositoryFileRaw(ctx context.Context, project, path, ref string) ([]byte, error)
 }
 
-// Loader discovers and caches skills from a GitLab repo.
+// Config bundles the inputs to New. New takes a Config rather
+// than positional args because the param list grew with the
+// bundled-set feature and a struct keeps call sites readable.
+type Config struct {
+	// Fetcher is the GitLab transport for remote skills. May
+	// be nil when only bundled skills are desired (e.g. tests
+	// that don't exercise the network path).
+	Fetcher SkillFetcher
+
+	// RepoPath is the GitLab project path the remote skills
+	// live in (e.g. "inful/mreview-skills"). Empty disables
+	// remote loading — only bundled skills are available.
+	RepoPath string
+
+	// Directory is the directory within RepoPath that
+	// contains the .md files (e.g. "skills"). Defaults to
+	// "skills" when RepoPath is non-empty.
+	Directory string
+
+	// Ref is the branch / tag / SHA the loader reads from.
+	// Empty means "use the project's default branch".
+	Ref string
+
+	// Bundled is the set of always-on skills, keyed by Name.
+	// May be empty (no bundled skills) or nil (same).
+	// Production callers pass bundled.FS() parsed into a
+	// {name: body} map; tests pass synthetic maps.
+	Bundled map[string][]byte
+
+	// Logger is used for one-line status messages and per-file
+	// warnings. Nil falls back to slog.Default().
+	Logger *slog.Logger
+}
+
+// Loader discovers and caches skills from a GitLab repo + a
+// bundled set, merged with central-wins precedence.
 //
 // Loader is safe for concurrent use after construction. Load
 // populates the cache once; subsequent Loads return the cached
@@ -95,61 +146,74 @@ type SkillFetcher interface {
 //
 // The zero value is not usable; construct via New.
 type Loader struct {
-	fetcher   SkillFetcher
-	repoPath  string // e.g. "inful/mreview-skills"
-	directory string // e.g. "skills"
-	ref       string // e.g. "main" or a pinned SHA; "" = project's default branch
-	logger    *slog.Logger
+	cfg Config
 
 	mu     sync.Mutex
-	cache  map[string]Skill // keyed by Name
+	cache  map[string]Skill // keyed by Name; bundled ∪ remote, remote wins
 	loaded bool
 }
 
-// New returns a Loader pointed at repoPath's directory at ref.
-// logger may be nil; slog.Default() is used in that case.
-func New(fetcher SkillFetcher, repoPath, directory, ref string, logger *slog.Logger) *Loader {
-	if logger == nil {
-		logger = slog.Default()
+// New returns a Loader configured by cfg.
+func New(cfg Config) *Loader {
+	if cfg.Logger == nil {
+		cfg.Logger = slog.Default()
 	}
-	return &Loader{
-		fetcher:   fetcher,
-		repoPath:  repoPath,
-		directory: directory,
-		ref:       ref,
-		logger:    logger,
+	if cfg.Directory == "" && cfg.RepoPath != "" {
+		cfg.Directory = "skills"
 	}
+	return &Loader{cfg: cfg}
 }
 
-// RepoPath returns the configured repo path (e.g.
-// "inful/mreview-skills"). Exposed so the MCP server can log the
-// source for debuggability.
-func (l *Loader) RepoPath() string { return l.repoPath }
+// Bundled returns the always-on skill bodies the loader was
+// configured with. Useful for tests that want to assert which
+// names shipped with a given build.
+func (l *Loader) Bundled() map[string][]byte { return l.cfg.Bundled }
 
-// Directory returns the configured directory within the repo
-// (e.g. "skills").
-func (l *Loader) Directory() string { return l.directory }
+// RepoPath returns the configured remote repo path (e.g.
+// "inful/mreview-skills"). Empty means "remote is disabled".
+// Exposed so the MCP server can log the source for
+// debuggability.
+func (l *Loader) RepoPath() string { return l.cfg.RepoPath }
 
-// Ref returns the configured ref (branch / tag / SHA; "" for
-// the project's default branch).
-func (l *Loader) Ref() string { return l.ref }
+// Directory returns the configured directory within the remote
+// repo (e.g. "skills"). Empty when remote is disabled.
+func (l *Loader) Directory() string { return l.cfg.Directory }
 
-// Load discovers all skills in the configured directory, fetches
-// each body, and caches them.
+// Ref returns the configured remote ref (branch / tag / SHA;
+// "" for the project's default branch). Empty when remote is
+// disabled.
+func (l *Loader) Ref() string { return l.cfg.Ref }
+
+// Load discovers all skills (bundled ∪ remote, central-wins)
+// and caches them.
 //
 // First call hits GitLab (one ListRepositoryTree + N
-// GetRepositoryFileRaw calls). Subsequent calls return the cached
-// slice without re-fetching.
+// GetRepositoryFileRaw calls). Subsequent calls return the
+// cached slice without re-fetching.
 //
-// Filtering: only TreeNode.Type=="blob" AND Name ends in ".md"
-// survive. Subdirectories and non-markdown files are silently
-// skipped — the agent never sees them in list_skills.
+// Filtering (remote): only TreeNode.Type=="blob" AND Name
+// ends in ".md" survive. Subdirectories and non-markdown
+// files are silently skipped — the agent never sees them in
+// list_skills.
 //
-// Error handling: a ListRepositoryTree error is fatal (the loader
-// has no idea what skills exist). A per-file fetch error is
-// logged at WARN and the file is skipped; Load still returns the
-// successfully-fetched skills. This keeps a single transient
-// failure from blanking out the whole skill set.
+// Error handling:
+//   - Bundled skills are always loaded; they cannot fail at
+//     runtime (the embedded FS is build-time-validated).
+//   - A remote list error is logged at WARN and falls back to
+//     the bundled set. The agent never sees an empty list
+//     when bundled is non-empty.
+//   - A per-file remote fetch error is logged at WARN and the
+//     file is skipped; the load continues.
+//
+// Override: when a remote skill has the same Name as a
+// bundled skill, the remote wins and the bundled version is
+// discarded. The agent never sees the bundled variant of an
+// overridden skill.
+//
+// Returns the merged skill set as a slice (order is not
+// guaranteed). The first call returns a non-nil slice even
+// when the remote fails; the second call returns the cached
+// slice.
 func (l *Loader) Load(ctx context.Context) ([]Skill, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -158,58 +222,46 @@ func (l *Loader) Load(ctx context.Context) ([]Skill, error) {
 		return l.snapshotLocked(), nil
 	}
 
-	nodes, err := l.fetcher.ListRepositoryTree(ctx, l.repoPath, l.directory, l.ref)
-	if err != nil {
-		return nil, fmt.Errorf("skills: list %s/%s: %w", l.repoPath, l.directory, err)
-	}
+	out := l.bundledLocked()
 
-	out := make([]Skill, 0, len(nodes))
-	for _, n := range nodes {
-		if !isMarkdownBlob(n) {
-			continue
-		}
-		body, err := l.fetcher.GetRepositoryFileRaw(ctx, l.repoPath, n.Path, l.ref)
-		if err != nil {
-			// Don't fail the whole load for one bad file.
-			// Log and skip; the agent sees the rest.
-			l.logger.Warn("skills: fetch failed; skipping",
-				"repo", l.repoPath,
-				"path", n.Path,
+	// Fetch remote when configured. A failure here is
+	// surfaced as a Load error when there's no bundled
+	// fallback (operators need to know the remote is broken);
+	// when bundled skills exist, the error is logged at WARN
+	// and the bundled set is returned as-is.
+	if l.cfg.Fetcher != nil && l.cfg.RepoPath != "" {
+		if err := l.fetchRemoteLocked(ctx, out); err != nil {
+			if len(l.cfg.Bundled) == 0 {
+				return nil, err
+			}
+			l.cfg.Logger.Warn("skills: remote fetch failed; using bundled only",
+				"repo", l.cfg.RepoPath,
+				"directory", l.cfg.Directory,
 				"err", err.Error(),
 			)
-			continue
 		}
-		out = append(out, Skill{
-			Name:        skillNameFromFilename(n.Name),
-			Path:        n.Path,
-			Description: extractDescription(body),
-			SHA:         n.ID,
-			Body:        body,
-		})
 	}
 
-	l.cache = make(map[string]Skill, len(out))
-	for _, s := range out {
-		l.cache[s.Name] = s
-	}
+	l.cache = out
 	l.loaded = true
-	l.logger.Info("skills loaded",
-		"repo", l.repoPath,
-		"directory", l.directory,
-		"ref", l.ref,
-		"count", len(out),
+	l.cfg.Logger.Info("skills loaded",
+		"repo", l.cfg.RepoPath,
+		"directory", l.cfg.Directory,
+		"ref", l.cfg.Ref,
+		"bundled_count", len(l.cfg.Bundled),
+		"merged_count", len(out),
 	)
-	return out, nil
+	return l.snapshotLocked(), nil
 }
 
-// Read returns the cached skill whose Name matches name. Returns
-// ErrSkillNotFound (wrapped with the requested name) when no
-// cached skill matches.
+// Read returns the cached skill whose Name matches name.
+// Returns ErrSkillNotFound (wrapped with the requested name)
+// when no cached skill matches.
 //
 // Read does NOT call the fetcher on its own. The contract is:
 // Load once, Read many times. This keeps Read cheap (a map
-// lookup) and the cache authoritative. Callers needing on-demand
-// fetch should call Load first.
+// lookup) and the cache authoritative. Callers needing
+// on-demand fetch should call Load first.
 func (l *Loader) Read(_ context.Context, name string) (Skill, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -218,6 +270,64 @@ func (l *Loader) Read(_ context.Context, name string) (Skill, error) {
 		return Skill{}, fmt.Errorf("%w: %q", ErrSkillNotFound, name)
 	}
 	return s, nil
+}
+
+// bundledLocked returns a name→Skill map populated from the
+// configured bundled set. Each Skill's Path uses the
+// "bundled://" prefix so the source is identifiable in
+// list_skills output. Caller must hold l.mu.
+func (l *Loader) bundledLocked() map[string]Skill {
+	out := make(map[string]Skill, len(l.cfg.Bundled))
+	for name, body := range l.cfg.Bundled {
+		out[name] = Skill{
+			Name:        name,
+			Path:        bundledPathPrefix + name + ".md",
+			Description: extractDescription(body),
+			Body:        body,
+		}
+	}
+	return out
+}
+
+// fetchRemoteLocked lists the configured directory, fetches
+// each .md body, and merges into out. Remote wins on Name
+// collision with a bundled skill — the bundled entry is
+// silently replaced. A non-nil error is returned only for
+// catastrophic failures (list error); per-file fetch errors
+// are logged and skipped.
+//
+// Caller must hold l.mu.
+func (l *Loader) fetchRemoteLocked(ctx context.Context, out map[string]Skill) error {
+	nodes, err := l.cfg.Fetcher.ListRepositoryTree(ctx, l.cfg.RepoPath, l.cfg.Directory, l.cfg.Ref)
+	if err != nil {
+		return fmt.Errorf("skills: list %s/%s: %w", l.cfg.RepoPath, l.cfg.Directory, err)
+	}
+
+	for _, n := range nodes {
+		if !isMarkdownBlob(n) {
+			continue
+		}
+		body, err := l.cfg.Fetcher.GetRepositoryFileRaw(ctx, l.cfg.RepoPath, n.Path, l.cfg.Ref)
+		if err != nil {
+			// Don't fail the whole load for one bad file.
+			// Log and skip; the agent sees the rest (and
+			// the bundled version of this name if any).
+			l.cfg.Logger.Warn("skills: fetch failed; skipping",
+				"repo", l.cfg.RepoPath,
+				"path", n.Path,
+				"err", err.Error(),
+			)
+			continue
+		}
+		out[skillNameFromFilename(n.Name)] = Skill{
+			Name:        skillNameFromFilename(n.Name),
+			Path:        n.Path,
+			Description: extractDescription(body),
+			SHA:         n.ID,
+			Body:        body,
+		}
+	}
+	return nil
 }
 
 // snapshotLocked returns the cached skills as a slice. Order is
@@ -247,6 +357,38 @@ func isMarkdownBlob(n gitlab.TreeNode) bool {
 func skillNameFromFilename(name string) string {
 	base := filepath.Base(name)
 	return strings.TrimSuffix(base, ".md")
+}
+
+// LoadBundled is a convenience for callers that have an
+// embedded fs.FS (e.g. internal/skills/bundled.FS()) and want
+// to materialise its .md files into the {name: body} map
+// the Loader expects. Files whose Name doesn't end in ".md"
+// are skipped.
+//
+// Returns an error when the FS can't be walked; per-file read
+// errors are also returned (defensive — production FSes
+// shouldn't fail per-file).
+func LoadBundled(fsys fs.FS) (map[string][]byte, error) {
+	if fsys == nil {
+		return map[string][]byte{}, nil
+	}
+	out := map[string][]byte{}
+	entries, err := fs.ReadDir(fsys, ".")
+	if err != nil {
+		return nil, fmt.Errorf("skills: read bundled dir: %w", err)
+	}
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".md") {
+			continue
+		}
+		data, err := fs.ReadFile(fsys, e.Name())
+		if err != nil {
+			return nil, fmt.Errorf("skills: read bundled %s: %w", e.Name(), err)
+		}
+		name := strings.TrimSuffix(e.Name(), ".md")
+		out[name] = data
+	}
+	return out, nil
 }
 
 // extractDescription returns the first non-empty paragraph of

@@ -35,7 +35,12 @@ func loadedLoader(t *testing.T, repoPath, directory, ref string, canned []skills
 		list:   toTreeNodes(canned),
 		bodies: skillBodies(canned),
 	}
-	l := skills.New(fetcher, repoPath, directory, ref, nil)
+	l := skills.New(skills.Config{
+		Fetcher:   fetcher,
+		RepoPath:  repoPath,
+		Directory: directory,
+		Ref:       ref,
+	})
 	if _, err := l.Load(context.Background()); err != nil {
 		t.Fatalf("seed Load: %v", err)
 	}
@@ -150,7 +155,12 @@ func TestHandleListSkills_ReturnsCachedSkills(t *testing.T) {
 // that an empty skill set returns [] (not nil) and count=0.
 // The MCP agent relies on this shape to iterate safely.
 func TestHandleListSkills_EmptyCacheReturnsEmptyArray(t *testing.T) {
-	l := skills.New(nopFetcher{}, "group/repo", "skills", "main", nil)
+	l := skills.New(skills.Config{
+		Fetcher:   nopFetcher{},
+		RepoPath:  "group/repo",
+		Directory: "skills",
+		Ref:       "main",
+	})
 	_, out, err := handleListSkills(context.Background(), l)
 	if err != nil {
 		t.Fatalf("handleListSkills: %v", err)
@@ -214,7 +224,12 @@ func TestHandleReadSkill_UnknownName_ReturnsError(t *testing.T) {
 // handler rejects empty input up-front. Don't let the missing
 // field propagate as a generic "not found".
 func TestHandleReadSkill_EmptyName_ReturnsError(t *testing.T) {
-	l := skills.New(nopFetcher{}, "group/repo", "skills", "main", nil)
+	l := skills.New(skills.Config{
+		Fetcher:   nopFetcher{},
+		RepoPath:  "group/repo",
+		Directory: "skills",
+		Ref:       "main",
+	})
 
 	_, _, err := handleReadSkill(context.Background(), l, readSkillInput{Name: ""})
 	if err == nil {
