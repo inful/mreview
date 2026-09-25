@@ -45,8 +45,9 @@ type CLI struct {
 	Config    string `name:"config" env:"MREVIEW_CONFIG" type:"path" help:"Path to YAML config file (default: ~/.config/mreview/config.yaml). When set, values populate env vars before flag parsing; explicit flags always win."`
 
 	// Subcommands. Each is a flag-bag struct dispatched from main.go.
-	Review *ReviewCmd `cmd:"review" help:"Review a merge request once and exit."`
-	Doctor *DoctorCmd `cmd:"doctor" help:"Validate config + provider + GitLab connectivity."`
+	Review    *ReviewCmd    `cmd:"review" help:"Review a merge request once and exit."`
+	Doctor    *DoctorCmd    `cmd:"doctor" help:"Validate config + provider + GitLab connectivity."`
+	SkillsMCP *SkillsMCPCmd `cmd:"skills-mcp" hidden:"" help:"Run the skills MCP server over stdio. Internal — invoked by the harness library as a subprocess when --skills-repo is set."`
 }
 
 // resolveConfigPath returns the config file path the user wants to

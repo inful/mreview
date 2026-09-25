@@ -34,6 +34,12 @@ type File struct {
 	Review   ReviewConfig   `yaml:"review"`
 	Retry    RetryConfig    `yaml:"retry"`
 
+	// Skills configures the optional skills MCP server (issue
+	// #44). When RepoPath is empty the skills layer is
+	// disabled — no MCP server, no mcp__skills__* tools,
+	// existing deployments are unchanged.
+	Skills SkillsConfig `yaml:"skills,omitempty"`
+
 	// LLMPresets is an optional map of model-name → preset. The
 	// cmd layer uses ApplyPreset(model) to derive a packing
 	// budget and per-chunk timeout when the operator hasn't
@@ -88,6 +94,47 @@ type ReviewConfig struct {
 	BotUsernameEnv string `yaml:"bot_username_env,omitempty"`
 }
 
+// SkillsConfig configures the optional skills MCP server (issue
+// #44). The agent uses skills as on-demand team-authored review
+// guidance — see internal/skills/ for the loader and
+// internal/skills/mcp/ for the MCP transport.
+//
+// All fields are optional. When RepoPath is empty, the skills
+// layer is disabled and no mcp__skills__* tools are exposed.
+// Defaults() fills sensible values for an air-gapped /
+// public-instance deployment that just points at the canonical
+// upstream.
+type SkillsConfig struct {
+	// RepoPath is the GitLab project path (e.g.
+	// "inful/mreview-skills") that hosts the .md skills.
+	// Required to enable the skills MCP server. Empty
+	// disables the feature.
+	RepoPath string `yaml:"repo_path,omitempty"`
+
+	// Directory is the directory within RepoPath that
+	// contains the .md files (e.g. "skills"). Defaults to
+	// "skills".
+	Directory string `yaml:"directory,omitempty"`
+
+	// Ref is the branch / tag / SHA the loader reads from.
+	// Empty means "use the project's default branch". Pinned
+	// SHAs are a deliberate future addition — see #44.
+	Ref string `yaml:"ref,omitempty"`
+
+	// TokenEnv is the NAME of the env var carrying the PAT
+	// used to read the skills repo. Empty defaults to
+	// GitLab.TokenEnv at the cmd layer so existing
+	// deployments reuse the same token.
+	TokenEnv string `yaml:"token_env,omitempty"`
+}
+
+// IsZero reports whether s carries no configuration at all.
+// Used by the cmd layer to decide whether to skip starting the
+// skills MCP server entirely.
+func (s SkillsConfig) IsZero() bool {
+	return s.RepoPath == "" && s.Directory == "" && s.Ref == "" && s.TokenEnv == ""
+}
+
 // ServerConfig used to hold `mreview serve` settings. The
 // architecture reset (#42) drops the serve mode; the type
 // is kept as a stub so old YAML config files referencing
@@ -140,6 +187,25 @@ func (f *File) Defaults() {
 	if f.Retry.MaxBackoff == "" {
 		f.Retry.MaxBackoff = "30s"
 	}
+	// Skills defaults only fire when the operator configured
+	// at least RepoPath. A blank skills: section in YAML
+	// keeps the feature disabled — no surprise outbound
+	// requests against a public GitLab repo.
+	if f.Skills.RepoPath != "" {
+		if f.Skills.Directory == "" {
+			f.Skills.Directory = "skills"
+		}
+		if f.Skills.Ref == "" {
+			f.Skills.Ref = "main"
+		}
+		if f.Skills.TokenEnv == "" {
+			// Default to reusing the GitLab token. The
+			// cmd layer resolves the env-var name to a
+			// value at wire time; this field only carries
+			// the NAME of the env var.
+			f.Skills.TokenEnv = f.GitLab.TokenEnv
+		}
+	}
 }
 
 // Validate checks the populated File for required / well-formed
@@ -152,6 +218,20 @@ func (f *File) Validate() error {
 	}
 	if f.GitLab.TokenEnv == "" {
 		missing = append(missing, "gitlab.token_env")
+	}
+	// Skills validation only fires when skills are enabled
+	// (RepoPath set). Empty Skills means "disabled" — no
+	// validation, no error.
+	if f.Skills.RepoPath != "" {
+		if f.Skills.Directory == "" {
+			missing = append(missing, "skills.directory")
+		}
+		if f.Skills.Ref == "" {
+			missing = append(missing, "skills.ref")
+		}
+		if f.Skills.TokenEnv == "" {
+			missing = append(missing, "skills.token_env")
+		}
 	}
 	if len(missing) > 0 {
 		return fmt.Errorf("config: missing required fields: %s", strings.Join(missing, ", "))

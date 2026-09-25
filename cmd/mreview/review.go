@@ -160,6 +160,23 @@ type ReviewCmd struct {
 	// (caller exits with ExitConfig).
 	ArtifactsDir string `default:".mreview-artifacts" name:"artifacts-dir" env:"MREVIEW_ARTIFACTS_DIR" type:"path" help:"Directory containing CI artifacts (build.log, test_results.json, lint.json, vulns.json). Default .mreview-artifacts."`
 
+	// Skills (issue #44) wires the optional skills MCP server
+	// into the harness runtime. The server exposes
+	// mcp__skills__list_skills and mcp__skills__read_skill so
+	// the agent can pull team-authored review guidance on
+	// demand. Set --skills-repo to a GitLab project that hosts
+	// a skills/ directory of .md files; the server reads them
+	// at startup and caches for the run.
+	//
+	// All four flags are optional; when --skills-repo is empty
+	// the skills MCP server is NOT started and existing
+	// deployments see no behavior change. The token env defaults
+	// to the same env var --gitlab-token reads from.
+	SkillsRepo     string `name:"skills-repo"      env:"MREVIEW_SKILLS_REPO"      help:"GitLab project path (group/project) that hosts the skills .md files. Empty disables the skills MCP server."`
+	SkillsDir      string `name:"skills-dir"       env:"MREVIEW_SKILLS_DIR"       help:"Directory within --skills-repo containing the .md files. Default 'skills'."`
+	SkillsRef      string `name:"skills-ref"       env:"MREVIEW_SKILLS_REF"       help:"Branch / tag / SHA to read the skills from. Default 'main'."`
+	SkillsTokenEnv string `name:"skills-token-env" env:"MREVIEW_SKILLS_TOKEN_ENV" help:"NAME of the env var carrying the PAT for the skills repo. Default reuses --gitlab-token-env (GITLAB_TOKEN)."`
+
 	// Verbose is intentionally NOT declared here — it lives on
 	// the parent CLI struct so it's accepted globally.
 }
@@ -311,6 +328,10 @@ func runReview(parentCtx context.Context, stdout io.Writer, c *ReviewCmd, cfg *c
 		NoDedup:          c.NoDedup,
 		TokensaveEnabled: c.TokensaveEnabled,
 		TokensaveBin:     c.TokensaveBin,
+		SkillsRepo:       c.SkillsRepo,
+		SkillsDir:        c.SkillsDir,
+		SkillsRef:        c.SkillsRef,
+		SkillsTokenEnv:   c.SkillsTokenEnv,
 		Artifacts:        artifactSet,
 		Logger:           logger,
 	})

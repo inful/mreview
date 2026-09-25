@@ -82,6 +82,23 @@ type clientDeps struct {
 	TokensaveEnabled bool
 	TokensaveBin     string
 
+	// Skills MCP integration (issue #44). When SkillsRepo is
+	// non-empty, the harness spawns `mreview skills-mcp` as a
+	// subprocess and registers its tools under the
+	// mcp__skills__* namespace. Empty SkillsRepo keeps the
+	// skills layer disabled — no subprocess, no tools.
+	//
+	// SkillsDir / SkillsRef / SkillsTokenEnv mirror the YAML
+	// / CLI defaults (skills/, main, reuse --gitlab-token).
+	// SkillBin is the path to the mreview binary the harness
+	// spawns; empty means PATH-resolved "mreview" (the same
+	// binary, with the hidden `skills-mcp` subcommand).
+	SkillsRepo     string
+	SkillsDir      string
+	SkillsRef      string
+	SkillsTokenEnv string
+	SkillBin       string
+
 	// Artifacts carries the CI artifact set (PR #5) the
 	// orchestrator threads into the prompt. Nil = no
 	// artifacts configured.
@@ -167,6 +184,10 @@ func buildReviewer(ctx context.Context, deps clientDeps) (*reviewer.Orchestrator
 //     enabled=true (default); the MCP server is a one-shot
 //     subprocess that the harness library owns and the agent
 //     reaches via the mcp__tokensave__* namespace.
+//   - skills MCP server (issue #44) is registered when
+//     --skills-repo is set; the agent reaches
+//     mcp__skills__list_skills / mcp__skills__read_skill.
+//     Disabled when --skills-repo is empty.
 //
 // Why tokensave-only: a previously-registered harness
 // read_file with WorkDir=… silently did `os.Open` against the
@@ -194,10 +215,10 @@ func buildHarnessRuntime(ctx context.Context, llmProvider llm.LLMProvider, deps 
 	reg := tool.NewRegistry()
 	// (no local file tools — tokensave-only by contract)
 
-	// Build the AgentSpec. Tokensave MCP server is registered
-	// when enabled; the harness library handles connection +
-	// tool namespacing + subprocess lifecycle (Runtime.Close
-	// releases it).
+	// Build the AgentSpec. Tokensave + skills MCP servers
+	// are registered as configured; the harness library
+	// handles connection + tool namespacing + subprocess
+	// lifecycle (Runtime.Close releases them).
 	spec := runtime.AgentSpec{
 		ID:              "mreview",
 		Name:            "mreview",
@@ -207,13 +228,21 @@ func buildHarnessRuntime(ctx context.Context, llmProvider llm.LLMProvider, deps 
 		MaxTurns:        deps.MaxTurns,
 		MaxOutputTokens: deps.MaxOutputTokens,
 	}
+
+	// Wire optional MCP servers. Order doesn't matter — the
+	// harness namespaces each by its ServerConfig.Name.
 	if deps.TokensaveEnabled {
-		spec.MCPServers = []mcpServerConfig{
-			tokensave.SpawnMCPServer(tokensave.Config{
-				ProjectRoot: deps.WorkDir,
-				Bin:         deps.TokensaveBin,
-			}),
+		spec.MCPServers = append(spec.MCPServers, tokensave.SpawnMCPServer(tokensave.Config{
+			ProjectRoot: deps.WorkDir,
+			Bin:         deps.TokensaveBin,
+		}))
+	}
+	if deps.SkillsRepo != "" {
+		skillsCfg, err := spawnSkillsMCPServerConfig(deps)
+		if err != nil {
+			return nil, fmt.Errorf("build harness runtime: skills MCP: %w", err)
 		}
+		spec.MCPServers = append(spec.MCPServers, skillsCfg)
 	}
 
 	// Session is required: runtime.Run unconditionally calls
@@ -235,6 +264,71 @@ func buildHarnessRuntime(ctx context.Context, llmProvider llm.LLMProvider, deps 
 		},
 		spec,
 	)
+}
+
+// spawnSkillsMCPServerConfig returns the harness ServerConfig
+// for the skills MCP server. Issue #44: the server is the
+// `mreview skills-mcp` subcommand running over stdio. All
+// inputs are passed via env vars (no flag quoting required at
+// spawn time).
+//
+// Token resolution: SkillsTokenEnv names an env var that
+// carries the PAT. The harness library's CommandTransport
+// merges cfg.Env into the spawned process's environment,
+// so the subprocess reads the same GITLAB_TOKEN (or whatever
+// the operator configured) without us re-implementing token
+// plumbing.
+//
+// ConnectTimeout=30s mirrors tokensave's generous startup
+// window — enough for a cold connect to a busy GitLab. The
+// subprocess is Optional=true: when it fails to start (e.g.
+// the skills repo is unreachable), the agent still runs with
+// just the tokensave tools.
+func spawnSkillsMCPServerConfig(deps clientDeps) (mcpServerConfig, error) {
+	bin := deps.SkillBin
+	if bin == "" {
+		bin = "mreview"
+	}
+
+	dir := deps.SkillsDir
+	if dir == "" {
+		dir = "skills"
+	}
+	ref := deps.SkillsRef
+	if ref == "" {
+		ref = "main"
+	}
+	tokenEnv := deps.SkillsTokenEnv
+	if tokenEnv == "" {
+		tokenEnv = "GITLAB_TOKEN"
+	}
+
+	env := map[string]string{
+		"MREVIEW_SKILLS_REPO": deps.SkillsRepo,
+		"MREVIEW_SKILLS_DIR":  dir,
+		"MREVIEW_SKILLS_REF":  ref,
+		"GITLAB_URL":          deps.GitLabURL,
+		"GITLAB_TOKEN":        deps.GitLabToken,
+		// Retry tunables forward to the subprocess so its
+		// GitLab API calls retry with the same policy the
+		// review path uses.
+		"MREVIEW_RETRIES":           fmt.Sprintf("%d", deps.Retries),
+		"MREVIEW_RETRY_BACKOFF":     deps.RetryBackoff.String(),
+		"MREVIEW_RETRY_MAX_BACKOFF": gitlab.DefaultMaxBackoff.String(),
+	}
+	// tokenEnv wins on conflict: the operator asked for a
+	// specific env var name, so we honour it even when the
+	// default GITLAB_TOKEN was also set above.
+	env[tokenEnv] = deps.GitLabToken
+
+	return mcp.ServerConfig{
+		Name:           "skills",
+		Command:        bin,
+		Args:           []string{"skills-mcp"},
+		Env:            env,
+		ConnectTimeout: 30 * time.Second,
+		Optional:       true,
+	}, nil
 }
 
 // mcpServerConfig is a type alias so we can swap the import

@@ -199,3 +199,129 @@ func TestSampleYAMLDurationsParse(t *testing.T) {
 		}
 	}
 }
+
+// TestParse_SkillsDisabledByDefault verifies that a config file
+// without a skills: section leaves Skills zero-valued (the cmd
+// layer treats IsZero() as "don't start the MCP server"). This
+// is the back-compat guarantee — existing deployments are
+// unchanged after #44 lands.
+func TestParse_SkillsDisabledByDefault(t *testing.T) {
+	f, err := Parse([]byte(`
+gitlab:
+  url: https://gitlab.com
+  token_env: GITLAB_TOKEN
+`))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if !f.Skills.IsZero() {
+		t.Errorf("Skills should be zero-valued when section is absent; got %+v", f.Skills)
+	}
+}
+
+// TestParse_SkillsSectionHonoursValues verifies that every
+// field of SkillsConfig round-trips through YAML.
+func TestParse_SkillsSectionHonoursValues(t *testing.T) {
+	yaml := `
+gitlab:
+  url: https://gitlab.com
+  token_env: GITLAB_TOKEN
+skills:
+  repo_path: inful/mreview-skills
+  directory: skills
+  ref: v1.2.3
+  token_env: SKILLS_PAT
+`
+	f, err := Parse([]byte(yaml))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if f.Skills.RepoPath != "inful/mreview-skills" {
+		t.Errorf("RepoPath = %q; want inful/mreview-skills", f.Skills.RepoPath)
+	}
+	if f.Skills.Directory != "skills" {
+		t.Errorf("Directory = %q; want skills", f.Skills.Directory)
+	}
+	if f.Skills.Ref != "v1.2.3" {
+		t.Errorf("Ref = %q; want v1.2.3", f.Skills.Ref)
+	}
+	if f.Skills.TokenEnv != "SKILLS_PAT" {
+		t.Errorf("TokenEnv = %q; want SKILLS_PAT", f.Skills.TokenEnv)
+	}
+}
+
+// TestParse_SkillsDefaultsPopulatedWhenRepoPathSet verifies
+// that Defaults() fills Directory / Ref / TokenEnv when
+// RepoPath is set but the other fields are absent. The cmd
+// layer can then build a loader without checking each field.
+func TestParse_SkillsDefaultsPopulatedWhenRepoPathSet(t *testing.T) {
+	f, err := Parse([]byte(`
+gitlab:
+  url: https://gitlab.com
+  token_env: GITLAB_TOKEN
+skills:
+  repo_path: inful/mreview-skills
+`))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if f.Skills.Directory != "skills" {
+		t.Errorf("Directory default = %q; want skills", f.Skills.Directory)
+	}
+	if f.Skills.Ref != "main" {
+		t.Errorf("Ref default = %q; want main", f.Skills.Ref)
+	}
+	if f.Skills.TokenEnv != "GITLAB_TOKEN" {
+		t.Errorf("TokenEnv default = %q; want GITLAB_TOKEN (reused from gitlab)", f.Skills.TokenEnv)
+	}
+}
+
+// TestParse_SkillsDefaultsNotAppliedWhenRepoPathEmpty verifies
+// the opt-in design: a blank skills: section keeps the feature
+// disabled even after Defaults() runs. Prevents surprise
+// outbound requests against a public GitLab repo for
+// deployments that never opted in.
+func TestParse_SkillsDefaultsNotAppliedWhenRepoPathEmpty(t *testing.T) {
+	f, err := Parse([]byte(`
+gitlab:
+  url: https://gitlab.com
+  token_env: GITLAB_TOKEN
+`))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if f.Skills.Directory != "" {
+		t.Errorf("Directory should be empty (disabled); got %q", f.Skills.Directory)
+	}
+	if f.Skills.Ref != "" {
+		t.Errorf("Ref should be empty (disabled); got %q", f.Skills.Ref)
+	}
+	if f.Skills.TokenEnv != "" {
+		t.Errorf("TokenEnv should be empty (disabled); got %q", f.Skills.TokenEnv)
+	}
+	if !f.Skills.IsZero() {
+		t.Errorf("Skills should be zero-valued when section is absent; got %+v", f.Skills)
+	}
+}
+
+// TestValidate_SkillsMissingFieldsSurfacesErrors verifies that
+// a partial skills config (RepoPath set but Directory / Ref /
+// TokenEnv missing) fails Validate. The cmd layer catches this
+// at startup with an actionable error rather than later, when
+// the loader silently fetches from "/" or fails on an empty
+// ref.
+func TestValidate_SkillsMissingFieldsSurfacesErrors(t *testing.T) {
+	f := &File{}
+	f.Defaults() // populates GitLab so it doesn't also fail
+	f.Skills.RepoPath = "inful/mreview-skills"
+	// Deliberately leave Skills.Directory / Ref / TokenEnv zero.
+	err := f.Validate()
+	if err == nil {
+		t.Fatal("expected validation error for partial skills config")
+	}
+	for _, want := range []string{"skills.directory", "skills.ref", "skills.token_env"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("validation error should mention %s; got %v", want, err)
+		}
+	}
+}

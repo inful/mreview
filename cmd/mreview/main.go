@@ -124,6 +124,8 @@ func run(parentCtx context.Context, args []string, stdout, stderr io.Writer) (ex
 		return exitCodeFromError(runReview(parentCtx, stdout, cli.Review, cfg, logger))
 	case "doctor":
 		return exitCodeFromError(runDoctor(parentCtx, stdout, cli.Doctor, logger))
+	case "skills-mcp":
+		return exitCodeFromError(runSkillsMCP(parentCtx, stdout, cli.SkillsMCP, logger))
 	default:
 		logger.Error("no subcommand matched", "command", ctx.Command())
 		return ExitConfig

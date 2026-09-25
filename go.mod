@@ -5,6 +5,7 @@ go 1.26.7
 require (
 	github.com/alecthomas/kong v1.16.1
 	github.com/bmatcuk/doublestar/v4 v4.10.2
+	github.com/modelcontextprotocol/go-sdk v1.5.0
 	github.com/sausheong/harness v0.4.2
 	gitlab.com/gitlab-org/api/client-go v1.46.0
 	gopkg.in/yaml.v3 v3.0.1
@@ -25,7 +26,6 @@ require (
 	github.com/gorilla/websocket v1.5.3 // indirect
 	github.com/hashicorp/go-cleanhttp v0.5.2 // indirect
 	github.com/hashicorp/go-retryablehttp v0.7.8 // indirect
-	github.com/modelcontextprotocol/go-sdk v1.5.0 // indirect
 	github.com/sashabaranov/go-openai v1.41.2 // indirect
 	github.com/segmentio/asm v1.1.3 // indirect
 	github.com/segmentio/encoding v0.5.4 // indirect
