@@ -44,6 +44,13 @@ func TestReviewSystemPrompt_CoreContract(t *testing.T) {
 		}
 	}
 
+	// skill-authoring bundled skill must be mentioned by
+	// name in the prompt so the agent reaches for it when
+	// reviewing a skills-repo MR (the meta-circular check).
+	if !strings.Contains(p, "skill-authoring") {
+		t.Errorf("system prompt must reference the bundled skill-authoring skill by name")
+	}
+
 	// Forbidden-tool mentions: the prompt must explicitly
 	// tell the agent it does NOT have shell / write / edit.
 	forbiddenMentions := []string{

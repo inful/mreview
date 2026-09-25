@@ -17,6 +17,24 @@ my-skills-repo/
     └── security-checklist.md # team-specific, never bundled
 ```
 
+## Layout is auto-checked on review
+
+When mreview reviews an MR against this repo, the agent reads
+the bundled `skill-authoring` skill first (the meta-circular
+check). It then applies those rules to the diff:
+
+- Kebab-case filenames, `.md` extension only
+- Frontmatter between `---` markers, optional but encouraged
+- First non-empty paragraph is the `list_skills` description
+  (200-char cap); no `# H1` as the description
+- One skill per file; aim for 10–30 lines of body
+- Override intent must be clear when replacing a bundled skill
+
+You don't need to memorise these — the reviewer will flag
+violations by name. The bundled skill also documents what
+counts as a violation so the agent's findings stay
+consistent run-to-run.
+
 ## How mreview loads this
 
 - **Default `directory`**: `skills` (configurable via `--skills-dir`).

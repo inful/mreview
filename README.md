@@ -681,6 +681,7 @@ The four bundled skills today:
 - `testing-patterns` — table-driven tests, sub-tests via `t.Run`, race detector in CI, no `time.Sleep`
 - `error-handling` — wrap with `%w`, sentinel errors, custom error types, log-vs-return rule
 - `tokensave-usage` — when to use which `mcp__tokensave__*` tool during a review
+- `skill-authoring` — layout contract for `.md` files in a `skills/` directory; read this when reviewing MRs that touch a skills repo (the meta-circular check)
 
 The full set lives at `internal/skills/bundled/*.md` in the
 mreview source tree. See `internal/skills/bundled/bundled.go`

@@ -24,6 +24,7 @@ func TestBundled_HasExpectedSkills(t *testing.T) {
 	want := []string{
 		"error-handling",
 		"go-review",
+		"skill-authoring",
 		"testing-patterns",
 		"tokensave-usage",
 	}
