@@ -79,12 +79,15 @@ stub that scripts response sequences.
 
 ```
 cmd/mreview/             kong wiring, exit codes, subcommand dispatch
-internal/gitlab/         Typed wrapper around client-go
+internal/gitlab/         Typed wrapper around client-go (incl. repository-files transport)
 internal/llm/            Provider + parser + chunker + prompt
 internal/reviewer/       Orchestrator (ReviewMR)
 internal/server/         Webhook HTTP receiver + worker pool
+internal/skills/         Skills loader (.md discovery + cache)
+  internal/skills/mcp/   MCP server exposing list_skills / read_skill over stdio
+  internal/skills/bundled/  .md files embedded into every binary (5 default skills)
 internal/logging/        slog setup
-examples/                config.yaml, docker-compose.yml, gitlab-ci.yml, webhook-setup.md
+examples/                config.yaml, docker-compose.yml, gitlab-ci.yml, skills-repo/, webhook-setup.md
 ```
 
 See `README.md` for the operator-facing docs.

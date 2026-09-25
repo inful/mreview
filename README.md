@@ -675,7 +675,7 @@ team-authored `.md` files.
 | Bundled (built into the binary) | `bundled://<name>.md` | Always — every release ships the same set. |
 | Central repo (configured via `--skills-repo`) | `skills/<name>.md` | When the operator configured a repo. |
 
-The four bundled skills today:
+The five bundled skills today:
 
 - `go-review` — generic Go checklist (error wrapping, goroutine leaks, context propagation, race conditions, slice aliasing)
 - `testing-patterns` — table-driven tests, sub-tests via `t.Run`, race detector in CI, no `time.Sleep`
@@ -878,6 +878,13 @@ GitLab post).
 schema, change the severity values, ask for non-JSON output,
 or rename the response fields. Doing any of those would break
 the parser. The system prompt's contract is locked in by tests.
+
+**Skills are a softer customization path.** Skills are
+team-authored review guidance (`.md` files) the agent reads
+on demand via two MCP tools — without touching the prompt
+contract at all. See [Skills](#skills) for the authoring
+rules and override semantics; five bundled skills ship with
+every release and a central repo can augment them.
 
 ## Flag reference
 
@@ -1247,6 +1254,89 @@ Solutions:
 - Raise `--queue-size` (default 32).
 - Raise `--shutdown-timeout` so the pool can drain on the next deploy.
 - GitLab retries 5xx with exponential backoff, so no events are lost.
+
+### Skills: list_skills returns useless headings instead of descriptions
+
+Symptom: `mcp__skills__list_skills` output for the bundled skills
+looks like:
+
+```
+go-review         → "# Go code review checklist"
+testing-patterns  → "# Go test patterns"
+error-handling    → "# Error handling conventions"
+...
+```
+
+The agent can't tell what the skills cover without `read_skill`-ing
+each one.
+
+Cause: the skill's `.md` file is missing a `description:` field in
+its YAML frontmatter. The loader reads `description:` from
+frontmatter verbatim (issue #44); without one, it falls back to
+the first paragraph of the body — which, in this case, is the
+`# H1` heading.
+
+Fix: add a frontmatter `description:` to each affected file:
+
+```markdown
+---
+title: My skill
+description: One-line summary that appears in list_skills
+---
+
+# My skill
+
+Real content starts here.
+```
+
+See [`internal/skills/bundled/skill-authoring.md`](internal/skills/bundled/skill-authoring.md)
+for the full authoring rules and
+[`examples/skills-repo/`](examples/skills-repo/) for a reference layout.
+
+### Skills: my override doesn't replace the bundled skill
+
+Symptom: the agent sees the bundled skill's body even though a
+file with the same name exists in the central skills repo.
+
+Cause: the override semantic is **filename match**, not body
+match. The central repo's `skills/error-handling.md` only overrides
+`bundled://error-handling.md` if the filename (minus `.md`) is
+identical.
+
+Common mistakes:
+
+- **`error-handling.md` vs `error_handling.md`** — kebab-case is
+  the convention; underscores don't match.
+- **`errorHandling.md`** — camelCase doesn't match; rename to
+  kebab-case.
+- **Wrong directory** — the file lives under `skills/`, not at
+  the repo root. mreview's `--skills-dir` defaults to `skills`;
+  if your repo uses `guidelines/`, set `--skills-dir=guidelines`.
+
+Verify with `gh api` or `curl` against the GitLab tree API; the
+file must appear as a `blob` of type `markdown` under the
+configured `--skills-dir`.
+
+### Skills: 4xx / 5xx from GitLab on every list_skills call
+
+Symptom: subprocess logs show `skills: remote fetch failed;
+using bundled only` followed by a `WARN` line carrying the
+HTTP status.
+
+Cause: the central repo's GitLab instance rejected the request.
+
+Common fixes:
+
+- **401 / 403**: `--skills-token-env` (or the env var it points
+  to) holds an expired or under-scoped token. The default is
+  `--gitlab-token-env`, which is `GITLAB_TOKEN` — re-issue the
+  PAT with `api` scope and verify the env var name matches.
+- **404**: `repo_path` (`group/project`) is wrong, or the project
+  doesn't have the `skills/` directory. Check
+  `--skills-dir` against the repo's actual layout.
+- **502 / 503**: GitLab is down or behind a VPN. The agent still
+  sees the bundled set — graceful degradation is the headline
+  contract. Re-run when the network is back.
 
 ## Examples
 
