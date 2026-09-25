@@ -30,6 +30,13 @@ func TestReviewSystemPrompt_CoreContract(t *testing.T) {
 		"mcp__tokensave__smart_context",
 		"mcp__tokensave__semantic_search",
 		"mcp__tokensave__impact_analysis",
+		// Skills tools (issue #44). These are optional at
+		// runtime (only present when --skills-repo is set),
+		// but the prompt must mention them so the agent
+		// knows the names exist and can use them when
+		// they're available.
+		"mcp__skills__list_skills",
+		"mcp__skills__read_skill",
 	}
 	for _, tool := range requiredTools {
 		if !strings.Contains(p, tool) {

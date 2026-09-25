@@ -37,6 +37,7 @@ https://gitlab.example.com/group/project/-/merge_requests/42
 - [Policy enforcement](#policy-enforcement)
 - [Read-only tool surface](#read-only-tool-surface)
 - [CI artifact reuse](#ci-artifact-reuse)
+- [Skills](#skills)
 - [What the bot posts](#what-the-bot-posts)
 - [Exit codes](#exit-codes)
 - [Read-only tool surface](#read-only-tool-surface)
@@ -643,6 +644,67 @@ how much corroboration the agent has.
 
 See [`examples/central-ci.yml`](examples/central-ci.yml) for
 the full producer + mreview pipeline layout.
+
+## Skills
+
+Skills are team-authored review guidance (`.md` files) the
+agent reads on demand via two MCP tools:
+
+| Tool | Returns |
+|---|---|
+| `mcp__skills__list_skills` | Every skill's name, description, and source path. No body bytes. |
+| `mcp__skills__read_skill` | The full body of one skill by name. |
+
+The agent calls `list_skills` once after reading the diff
+headers, then `read_skill` for each skill whose description
+matches what it sees (language, framework, file kind). Skill
+bodies are advisory — they don't override the read-only
+contract or the Finding schema. They cover team conventions
+("our error wrapping is `%w`"), language-specific patterns,
+and known pitfalls.
+
+### Authoring skills
+
+One skill is one `.md` file in a shared GitLab repository's
+`skills/` directory:
+
+```markdown
+---
+title: Go review checklist
+---
+
+# When reviewing Go code
+
+- Flag any use of `panic` outside `cmd/.../main.go`.
+- ...
+```
+
+The first paragraph after frontmatter becomes the
+`list_skills` description (capped at 200 chars). Keep it to
+one or two sentences so the agent can scan the list cheaply.
+
+### Configuring skills
+
+Add a `skills:` block to your YAML config (or pass the
+matching `--skills-*` flags):
+
+```yaml
+skills:
+  repo_path: inful/mreview-skills   # group/project
+  directory: skills                 # default
+  ref: main                         # default; pin a SHA for reproducibility
+  # token_env: GITLAB_TOKEN         # default; reuse the review token
+```
+
+When `repo_path` is empty the skills MCP server is not
+started — existing deployments see no behavior change. The
+agent's system prompt explicitly handles both cases
+("`list_skills` returns an empty list or the tools aren't
+present → skills not configured → proceed without them"),
+so the prompt doesn't lie when skills are off.
+
+See issue [#44](https://github.com/inful/mreview/issues/44)
+for the design rationale and the agent-usage contract.
 
 ## Configuration
 

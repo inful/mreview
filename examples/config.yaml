@@ -109,6 +109,30 @@ retry:
   initial_backoff: 500ms # --retry-backoff
   max_backoff: 30s
 
+# Skills (issue #44): teach the agent team-authored review
+# guidance as on-demand .md files. The agent discovers skills
+# via mcp__skills__list_skills and reads individual ones via
+# mcp__skills__read_skill. Disabled when `repo_path` is absent.
+#
+# Each skill is one .md file under <repo>/<directory>/. Frontmatter
+# is skipped on description extraction. Bodies are passed to the
+# agent verbatim — author them as you would a Markdown README.
+#
+# Examples:
+#   - "always flag N+1 queries against our Postgres models"
+#   - "our error wrapping is %w, not plain fmt.Errorf"
+#   - "tests live next to the code they test"
+#
+# The token is reused from --gitlab-token by default; set
+# `token_env` only when the skills repo lives on a different
+# GitLab instance with its own PAT.
+#
+# skills:
+#   repo_path: inful/mreview-skills
+#   directory: skills          # default
+#   ref: main                  # default; pin a SHA for reproducibility
+#   token_env: GITLAB_TOKEN    # default; reuse the review token
+
 # Per-LLM model presets. When the running --model matches an entry
 # in llm_preset_by_model, the named preset's context_window drives
 # the derived --max-batch-bytes value, and per_chunk_timeout takes
