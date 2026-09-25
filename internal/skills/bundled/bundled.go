@@ -10,11 +10,19 @@
 // a same-named .md in their central repo — no fork of mreview
 // required.
 //
+// Each .md file uses YAML frontmatter to declare its
+// `description:` (the value `mcp__skills__list_skills` surfaces)
+// and `title:` (for editor previews). The loader reads
+// `description:` from frontmatter verbatim; skills without
+// frontmatter fall back to the first paragraph of the body.
+// See internal/skills/bundled/skill-authoring.md for the
+// authoring rules and internal/skills/loader.go for the
+// extraction logic.
+//
 // The .md files in this directory are intentionally kept small.
-// extractDescription caps descriptions at 200 chars (see
-// internal/skills/loader.go) and the loader passes bodies
-// through verbatim, so anything you put here is what the agent
-// sees.
+// extractDescription caps descriptions at 200 chars and the
+// loader passes bodies through verbatim, so anything you put
+// here is what the agent sees.
 package bundled
 
 import (

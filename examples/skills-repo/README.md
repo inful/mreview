@@ -53,7 +53,9 @@ consistent run-to-run.
    handle for `mcp__skills__read_skill`. Use kebab-case names so they
    read naturally in tool calls.
 
-2. **YAML frontmatter** is optional but encouraged:
+2. **YAML frontmatter** is optional but encouraged — the loader
+   reads `description:` from frontmatter to populate
+   `list_skills`:
 
    ```markdown
    ---
@@ -67,8 +69,12 @@ consistent run-to-run.
    - ...
    ```
 
-   The description is what the agent sees in `list_skills` — keep it
-   to one or two sentences so scanning is cheap.
+   The description is what the agent sees in `list_skills` —
+   keep it to one or two sentences so scanning is cheap.
+   Without a frontmatter description, the loader falls back to
+   the first paragraph of the body (and `# H1` as that
+   paragraph would surface as `# H1` in `list_skills` — not
+   informative).
 
 3. **Body length**: there is no hard cap. Bodies are passed to the
    agent verbatim via `mcp__skills__read_skill`. Aim for one screen

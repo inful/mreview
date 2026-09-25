@@ -391,43 +391,103 @@ func LoadBundled(fsys fs.FS) (map[string][]byte, error) {
 	return out, nil
 }
 
-// extractDescription returns the first non-empty paragraph of
-// body, trimmed and capped at descriptionCap characters.
+// extractDescription returns the skill's preview description,
+// capped at descriptionCap characters. Resolution order:
 //
-// A "paragraph" here is a run of non-blank lines joined by a
-// single space — markdown headings, single-line descriptions, and
-// multi-line summaries all collapse to one line for the
-// list_skills preview. The cap keeps list output bounded
-// regardless of skill size; long descriptions belong in the
-// skill body itself.
+//  1. If the body has a YAML frontmatter block with a non-empty
+//     `description:` key, return that value verbatim (trimmed,
+//     capped). Frontmatter is the canonical place for the
+//     preview — `mcp__skills__list_skills` surfaces this
+//     directly.
 //
-// Frontmatter handling: a leading YAML block between two `---`
-// markers (the convention for title / description / author
-// metadata in markdown tooling) is skipped before paragraph
-// extraction. Without this, the first paragraph would be the
-// frontmatter opener ("--- author: jone ---") and the actual
-// description would be invisible to list_skills.
+//  2. Otherwise, return the first non-empty paragraph of the
+//     content portion of the body (everything after the
+//     frontmatter block). This is the fallback path for
+//     skills without a `description:` key (older skills, or
+//     skills authored without frontmatter).
 //
-// Returns "" when body is empty or all-blank.
+// Frontmatter termination: a leading `---` is paired with
+// either a closing `---` (well-formed) or the first blank
+// line (unclosed — common typo). After that, content begins.
+// Truly malformed bodies (no closing fence, no blank line)
+// fall back to "no frontmatter" — the entire body is content.
 func extractDescription(body []byte) string {
-	lines := strings.Split(string(body), "\n")
+	fm, contentStart := parseFrontmatter(body)
+	if desc, ok := fm["description"]; ok && desc != "" {
+		return capDescription(desc)
+	}
+	return extractFirstParagraph(body, contentStart)
+}
 
-	// Skip a leading YAML frontmatter block: starts with "---"
-	// on line 0, ends with another "---" line. Anything after
-	// the closing fence is treated as content.
-	i := 0
-	if len(lines) > 0 && strings.TrimSpace(lines[0]) == "---" {
-		i++
-		for i < len(lines) && strings.TrimSpace(lines[i]) != "---" {
-			i++
+// parseFrontmatter returns the parsed frontmatter keys plus
+// the byte offset where content begins. The parser is
+// intentionally narrow:
+//
+//   - Leading `---` opens a frontmatter block (else: no FM).
+//   - Inside the block, `key: value` lines populate the map;
+//     `# ...` lines are comments; blank lines terminate.
+//   - `---` on its own line terminates (closing fence).
+//   - EOF without termination treats the entire body as
+//     content (no FM extracted).
+//
+// Only `description:` is consumed today. The parser is narrow
+// because frontmatter description is supposed to be one short
+// line; multi-line scalars and exotic YAML shapes fall through
+// to the body-fallback path.
+func parseFrontmatter(body []byte) (map[string]string, int) {
+	lines := strings.Split(string(body), "\n")
+	if len(lines) == 0 || strings.TrimSpace(lines[0]) != "---" {
+		// No frontmatter; content begins at byte 0.
+		return nil, 0
+	}
+
+	fm := map[string]string{}
+	i := 1
+	for ; i < len(lines); i++ {
+		line := strings.TrimSpace(lines[i])
+		switch {
+		case line == "---":
+			// Closing fence — content begins after this.
+			return fm, lineByteOffset(body, lines, i+1)
+		case line == "":
+			// Blank line in unclosed frontmatter — same
+			// effect as a closing fence. Content begins
+			// after this.
+			return fm, lineByteOffset(body, lines, i+1)
+		case strings.HasPrefix(line, "#"):
+			// YAML comment; skip.
+			continue
 		}
-		if i < len(lines) {
-			// Skip the closing fence too.
-			i++
+		if k, v, ok := strings.Cut(line, ":"); ok {
+			// Strip surrounding whitespace first so the
+			// quote-strip pass can actually see the
+			// quote at position 0.
+			v = strings.TrimSpace(v)
+			v = strings.Trim(v, `"'`)
+			fm[strings.TrimSpace(k)] = v
 		}
 	}
 
+	// EOF without a closing fence or blank line. Treat the
+	// entire body as content — malformed, but no FM was
+	// successfully parsed.
+	return nil, 0
+}
+
+// extractFirstParagraph reads body starting at byte offset
+// start, skips leading blank lines, and returns the first
+// non-blank paragraph (a run of non-blank lines joined by a
+// single space, terminated by a blank line or EOF). Capped
+// at descriptionCap characters.
+func extractFirstParagraph(body []byte, start int) string {
+	rest := body
+	if start > 0 && start < len(body) {
+		rest = body[start:]
+	}
+	lines := strings.Split(string(rest), "\n")
+
 	// Skip leading blank lines.
+	i := 0
 	for i < len(lines) && strings.TrimSpace(lines[i]) == "" {
 		i++
 	}
@@ -443,9 +503,35 @@ func extractDescription(body []byte) string {
 		i++
 	}
 
-	out := strings.TrimSpace(strings.Join(para, " "))
-	if len(out) > descriptionCap {
-		out = strings.TrimSpace(out[:descriptionCap])
+	return capDescription(strings.TrimSpace(strings.Join(para, " ")))
+}
+
+// lineByteOffset returns the byte offset in body where
+// lines[idx] starts, or len(body) when idx is past the end.
+// Used to translate parser line indices back to byte offsets
+// for slicing.
+func lineByteOffset(body []byte, lines []string, idx int) int {
+	if idx >= len(lines) {
+		return len(body)
 	}
-	return out
+	offset := 0
+	for j := 0; j < idx; j++ {
+		offset += len(lines[j]) + 1 // +1 for the newline
+	}
+	if offset > len(body) {
+		offset = len(body)
+	}
+	return offset
+}
+
+// capDescription trims s and truncates to descriptionCap
+// characters. Truncation is whitespace-aware: a truncation
+// mid-word is followed by TrimSpace so we don't end with a
+// dangling space.
+func capDescription(s string) string {
+	s = strings.TrimSpace(s)
+	if len(s) > descriptionCap {
+		s = strings.TrimSpace(s[:descriptionCap])
+	}
+	return s
 }

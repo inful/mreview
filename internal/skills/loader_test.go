@@ -339,12 +339,36 @@ func TestExtractDescription(t *testing.T) {
 		body string
 		want string
 	}{
-		{name: "frontmatter_then_paragraph", body: "---\nauthor: jone\n---\n\n# Heading\n\nBody line one.\nBody line two.\n", want: "# Heading"},
+		// Body-fallback path: frontmatter present but no
+		// `description:` key, or no frontmatter at all.
+		{name: "frontmatter_no_description_falls_back", body: "---\nauthor: jone\n---\n\n# Heading\n\nBody line one.\nBody line two.\n", want: "# Heading"},
 		{name: "single_line", body: "Just one line.", want: "Just one line."},
 		{name: "blank_lines_then_paragraph", body: "\n\n\nFirst paragraph.\n\nSecond paragraph.", want: "First paragraph."},
 		{name: "all_blank", body: "\n\n\n", want: ""},
 		{name: "cap_at_200", body: strings.Repeat("a", 500), want: strings.Repeat("a", 200)},
 		{name: "empty", body: "", want: ""},
+
+		// Frontmatter description path: `description:` wins
+		// regardless of what follows in the body.
+		{name: "frontmatter_description_wins_over_heading", body: "---\ndescription: Frontmatter value.\n---\n\n# Heading\n\nBody.\n", want: "Frontmatter value."},
+		{name: "frontmatter_description_with_title", body: "---\ntitle: My title\ndescription: Friendly description.\n---\n\n# Heading\n", want: "Friendly description."},
+		{name: "frontmatter_description_quoted_double", body: "---\ndescription: \"Quoted value.\"\n---\n\n# Heading\n", want: "Quoted value."},
+		{name: "frontmatter_description_quoted_single", body: "---\ndescription: 'Quoted value.'\n---\n\n# Heading\n", want: "Quoted value."},
+
+		// Frontmatter description edge cases.
+		{name: "frontmatter_description_empty_falls_back", body: "---\ndescription:\n---\n\n# Heading\n\nBody.\n", want: "# Heading"},
+		{name: "frontmatter_description_only_no_body", body: "---\ndescription: Lone description.\n---\n", want: "Lone description."},
+		{name: "frontmatter_description_capped", body: "---\ndescription: " + strings.Repeat("z", 500) + "\n---\n\nBody.\n", want: strings.Repeat("z", 200)},
+		{name: "frontmatter_unclosed_no_description_falls_back", body: "---\nauthor: jone\n\n# Heading\n\nBody.\n", want: "# Heading"},
+		{name: "frontmatter_unclosed_with_description_wins", body: "---\ndescription: still wins\n\n# Heading\n\nBody.\n", want: "still wins"},
+
+		// Real-world shape: frontmatter description + heading body.
+		// Mirrors the bundled skill format.
+		{
+			name: "realistic_bundled_skill_shape",
+			body: "---\ntitle: Go code review\ndescription: General patterns to look for when reviewing Go code\n---\n\n# Go code review checklist\n\nWhen reviewing Go code, look for:\n\n- **Error wrapping**: ...\n",
+			want: "General patterns to look for when reviewing Go code",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

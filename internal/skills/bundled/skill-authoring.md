@@ -30,10 +30,9 @@ contract honest.
 
 ## Frontmatter
 
-YAML frontmatter between two `---` markers is optional but
-encouraged. The loader skips it before extracting the
-description, so frontmatter content doesn't affect
-`list_skills` output. Recommended keys:
+YAML frontmatter between two `---` markers is the canonical
+place for skill metadata. The loader reads it before
+falling back to body extraction. Recommended keys:
 
 ```yaml
 ---
@@ -44,15 +43,36 @@ description: Team conventions for HTTP and RPC API design
 
 - `title:` — human-readable name for editor previews. Not
   consumed by the agent.
-- `description:` — what *you* would put in `list_skills` if
-  the body didn't have a clear first paragraph. The loader
-  prefers the first-paragraph version.
+- `description:` — what surfaces in `mcp__skills__list_skills`.
+  The loader reads this directly. When present and
+  non-empty, it's used verbatim (trimmed, capped at 200
+  characters). When absent or empty, the loader falls back
+  to the first paragraph of the body.
 
-## Description (first non-empty paragraph)
+The loader's frontmatter parser is narrow on purpose: it
+handles `key: value` and `key: "quoted value"` (single or
+double quotes), and ignores anything else. Multi-line
+scalars (`description: |`) and other exotic YAML shapes
+fall through to the body-fallback path. Frontmatter
+description is supposed to be one short line; if yours
+isn't, use the body-fallback path explicitly by leaving
+the frontmatter `description:` empty.
 
-The description is the first non-blank line of the body
-after the frontmatter block, capped at 200 characters.
-Follow these rules:
+## Description (fallback path: first paragraph of body)
+
+When frontmatter has no `description:` (or an empty one),
+the loader extracts the first non-blank paragraph of the
+body — a run of non-blank lines joined by a single space,
+until the first blank line. Capped at 200 characters.
+
+Use this path when:
+
+- You want the description to read naturally as the opening
+  prose of the skill (with the frontmatter carrying only
+  `title:`).
+- You're authoring without frontmatter at all.
+
+Follow these rules either way:
 
 - **Self-contained**. Don't start with "This skill..." or
   "Use this for..." — those prefixes waste the cap.
