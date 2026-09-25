@@ -48,18 +48,28 @@ CHANGELOG and decide version bumps.
 
 ## Adding a new LLM provider
 
-The reviewer depends on `llm.Provider` (interface in
-`internal/llm/provider.go`). To add a backend:
+After the architecture reset ([#42](https://github.com/inful/mreview/issues/42)),
+the provider matrix is owned by the
+[harness](https://github.com/sausheong/harness) library, not mreview
+itself. mreview only forwards three pieces to the harness:
 
-1. Write a new type implementing `Chat(ctx, ChatRequest) (*ChatResponse, error)`.
-2. Add it to `cmd/mreview/review.go` and `cmd/mreview/serve.go` constructor paths.
-3. Add the provider type to the docstrings in those files.
-4. Cover with stub-server tests under `internal/llm/`.
+- the **provider name** (`--provider`: `anthropic` / `openai` / `gemini` /
+  `litellm` / `openrouter` / `local`)
+- the **model name** (`--model`, e.g. `qwen2.5-coder:7b`)
+- the **base URL** for proxy / local providers (`--provider-base-url`,
+  e.g. `http://localhost:11434/v1`)
 
-The OpenAI-compatible backend (`internal/llm/openai.go`) already
-covers Ollama / llama.cpp / vLLM / LM Studio via a base URL swap,
-so most new "providers" are really new backends behind an
-OpenAI-compatible shim.
+The per-provider API-key env vars (`ANTHROPIC_API_KEY`,
+`OPENAI_API_KEY`, `GOOGLE_API_KEY`, `LITELLM_API_KEY`,
+`OPENROUTER_API_KEY`) are read by the harness library directly. mreview
+just passes the values through. To add a new provider, add the
+provider name to the enum in `cmd/mreview/review.go` and wire the
+new key lookup into `providerAPIKey` in the same file.
+
+The OpenAI-compatible backend (`--provider=local`) covers Ollama /
+llama.cpp / vLLM / LM Studio via a base URL swap, so most
+new "providers" are really new backends behind an
+OpenAI-compatible shim — no mreview code changes needed for those.
 
 ## Adding a new GitLab client method
 
@@ -80,14 +90,21 @@ stub that scripts response sequences.
 ```
 cmd/mreview/             kong wiring, exit codes, subcommand dispatch
 internal/gitlab/         Typed wrapper around client-go (incl. repository-files transport)
-internal/llm/            Provider + parser + chunker + prompt
-internal/reviewer/       Orchestrator (ReviewMR)
-internal/server/         Webhook HTTP receiver + worker pool
+internal/event/          Per-event guard (issue #41): draft + push skip
+internal/policy/         policy.yaml enforcement (issue #42 step 2)
+internal/diff/           Diff chunker (file + hunk splitting)
+internal/ci/artifact/    CI artifact loaders (issue #43)
+internal/prompts/        System prompt (//go:embed) + user prompt renderer
+internal/reviewer/       Orchestrator: fetch → chunk → harness → parse → dedupe → post
+internal/provider/       Provider name + base URL + key forwarding to harness
+internal/tokensave/      tokensave MCP server config (wired into AgentSpec)
 internal/skills/         Skills loader (.md discovery + cache)
   internal/skills/mcp/   MCP server exposing list_skills / read_skill over stdio
   internal/skills/bundled/  .md files embedded into every binary (5 default skills)
 internal/logging/        slog setup
-examples/                config.yaml, docker-compose.yml, gitlab-ci.yml, skills-repo/, webhook-setup.md
+internal/config/         YAML config loader (--config flag)
+internal/strutil/         Tiny string-trim helper
+examples/                config.yaml, docker-compose.yml, gitlab-ci.yml, central-ci.yml, policy.yaml, skills-repo/
 ```
 
 See `README.md` for the operator-facing docs.

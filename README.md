@@ -709,17 +709,21 @@ One skill is one `.md` file in a shared GitLab repository's
 ```markdown
 ---
 title: Go review checklist
+description: One-sentence summary of what this skill covers
 ---
 
-# When reviewing Go code
+# Go review checklist
 
 - Flag any use of `panic` outside `cmd/.../main.go`.
 - ...
 ```
 
-The first paragraph after frontmatter becomes the
-`list_skills` description (capped at 200 chars). Keep it to
-one or two sentences so the agent can scan the list cheaply.
+The `description:` field is what surfaces in `mcp__skills__list_skills`
+(capped at 200 chars). When frontmatter has no `description:`,
+the loader falls back to the first non-blank paragraph of the
+body — so a `# H1` as that paragraph would surface as `# H1` in
+`list_skills` (not informative). Keep the description to one or
+two sentences so the agent can scan the list cheaply.
 
 For a complete reference layout — README, four example
 skills, the auth + token config — see
@@ -823,7 +827,7 @@ Two image variants ship with every release:
 | Tag | Base | Shell | Use for |
 |---|---|---|---|
 | `:X.Y.Z` / `:latest` | `distroless/cc:nonroot` | none | Running mreview directly (`docker run`, Kubernetes pods, ECS tasks). Smaller attack surface. |
-| `:X.Y.Z-debug` / `:latest-debug` | `distroless/cc:debug-nonroot` | busybox + `/bin/sh` symlink | **GitLab CI, GitHub Actions, or any runner that needs a shell to invoke `script:` blocks.** Also useful for `docker exec -it` debugging. |
+| `:X.Y.Z-debug` / `:latest-debug` | `distroless/cc:debug-nonroot` | busybox at `/usr/bin/sh` (resolves `/bin/sh`); `mreview` also on PATH at `/usr/local/bin/mreview` | **GitLab CI, GitHub Actions, or any runner that needs a shell to invoke `script:` blocks.** Also useful for `docker exec -it` debugging. |
 
 Use the `-debug` variant in `image:` for CI jobs. The production variant's lack of a shell means GitLab Runner fails on `script:` blocks with `exec: "/bin/sh": not found` — confirmed by a real test against `ghcr.io/inful/mreview:0.9.0` during v0.9.1. Pin by tag for reproducibility (`:X.Y.Z-debug`) or track `:latest-debug` for auto-updates.
 
@@ -913,6 +917,10 @@ every release and a central repo can augment them.
 | `--tokensave-bin`             | `MREVIEW_TOKENSAVE_BIN`       | `tokensave` (`PATH` lookup; the Docker image has it at `/usr/local/bin/tokensave`) |
 | `--artifacts-dir`             | `MREVIEW_ARTIFACTS_DIR`       | `.mreview-artifacts`             |
 | `--policy-file`               | `MREVIEW_POLICY_FILE`         | empty (no policy)                |
+| `--skills-repo`               | `MREVIEW_SKILLS_REPO`         | empty (disables the central skills MCP server) |
+| `--skills-dir`                | `MREVIEW_SKILLS_DIR`          | `skills`                          |
+| `--skills-ref`                | `MREVIEW_SKILLS_REF`          | `main`                            |
+| `--skills-token-env`          | `MREVIEW_SKILLS_TOKEN_ENV`    | reuses `--gitlab-token-env` (typically `GITLAB_TOKEN`) |
 | `--on-drafts`                 | `MREVIEW_ON_DRAFTS`           | `skip`                           |
 | `--on-push`                   | `MREVIEW_ON_PUSH`             | `skip`                           |
 | `--bot-username`              | `GITLAB_BOT_USERNAME`         | empty (all comments count)       |
@@ -1009,6 +1017,15 @@ internal/reviewer/        Orchestrator: fetch → chunk → harness →
                           parse → dedupe → post. Runner interface
                           (HarnessRunner in production, FakeRunner
                           in tests).
+internal/skills/         Skills loader: discovers .md files in a
+                          GitLab repo (--skills-repo) or the bundled
+                          set (internal/skills/bundled/), merges with
+                          central-wins precedence, surfaces them as
+                          mcp__skills__list_skills / read_skill to
+                          the agent on demand.
+  internal/skills/mcp/    MCP server (stdio) exposing the skills
+                          tools; the harness library spawns
+                          `mreview skills-mcp` as a subprocess.
 internal/logging/         slog JSON/text setup
 internal/config/          YAML config loader (--config file flag)
 internal/strutil/         Tiny string-trim helper shared across
@@ -1017,7 +1034,8 @@ internal/strutil/         Tiny string-trim helper shared across
 examples/                 config.yaml + docker-compose.yml +
                           gitlab-ci.yml (single-repo pattern) +
                           policy.yaml + central-ci.yml (org-wide
-                          pattern).
+                          pattern) + skills-repo/ (copy-paste
+                          reference for a central skills repo).
 Dockerfile{,debug}        distroless static, multi-arch via goreleaser
 .goreleaser.yaml          Builds, archives, signs, docker images
 .github/workflows/        ci (lint + test on every push) + release (tag)
@@ -1025,16 +1043,19 @@ Dockerfile{,debug}        distroless static, multi-arch via goreleaser
 
 ### Why this layering
 
-**Three separate GitLab/Reviewer/Server packages.** `internal/gitlab/`
+**Two narrow layers + thin orchestrator.** `internal/gitlab/`
 knows how to talk to GitLab and nothing else. `internal/reviewer/`
 knows the review pipeline and depends on `gitlab.Client` only as a
-typed interface — it never imports `client-go`. `internal/server/`
-knows how to receive a webhook, enforce auth + throttling, and
-fan out to a worker pool. None of the three knows about the other
-two. You can replace any one without touching the others: drop in a
-new LLM provider without touching GitLab code; replace the worker
-pool with a queue without touching the reviewer; change the webhook
-auth without touching the pipeline.
+typed interface — it never imports `client-go`. `internal/skills/`
+knows how to load and cache skills; it depends on `gitlab.Client`
+through the `SkillFetcher` interface for remote fetching, and on
+`internal/skills/bundled/` for the embedded set. None of these
+imports the others' upstream libraries. You can replace any one
+without touching the others: drop in a new LLM provider (via the
+harness library) without touching GitLab code; replace the
+GitLab client wrapper with another provider without touching
+the reviewer; rewrite the skills loader without touching the
+MCP server, and vice versa.
 
 **One LLM call per chunk instead of one mega-call.** Local LLMs have
 small context windows and large diffs blow past them. We chunk by
@@ -1258,15 +1279,6 @@ hallucinated, the file has moved since the LLM saw it, or the file was
 renamed. The reviewer drops that single finding and continues with the
 rest. No action needed; if it happens often, consider a smaller model
 or a tighter prompt.
-
-### "queue full" HTTP 503 from `mreview serve`
-
-The worker pool is saturated (slow LLM + many simultaneous MR events).
-Solutions:
-
-- Raise `--queue-size` (default 32).
-- Raise `--shutdown-timeout` so the pool can drain on the next deploy.
-- GitLab retries 5xx with exponential backoff, so no events are lost.
 
 ### Skills: list_skills returns useless headings instead of descriptions
 

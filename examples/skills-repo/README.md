@@ -88,10 +88,12 @@ consistent run-to-run.
 
 See the four files in `skills/` for the format:
 
-- `go-review.md`, `testing-patterns.md`, `error-handling.md` mirror
-  the bundled defaults (override to tighten them).
-- `api-design.md` is a team-specific example.
-- `security-checklist.md` is a team-specific example.
+- `go-review.md` — mirrors the bundled default (override example);
+  replace the body to tighten the bundled rule.
+- `api-design.md` — team-specific HTTP/RPC conventions; never bundled.
+- `security-checklist.md` — team-specific auth / secrets / crypto;
+  never bundled.
+- `mr-description.md` — team's MR template + labels; never bundled.
 
 ## Pointing mreview at this repo
 
