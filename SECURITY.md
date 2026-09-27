@@ -46,11 +46,19 @@ patches to old releases.
 
 ## Webhook secret handling
 
-The `mreview serve` subcommand validates GitLab webhook
+> **Removed in v0.7.0.** The `mreview serve` subcommand and the
+> `X-Gitlab-Token` HMAC-comparison path it owned were dropped in
+> the architecture reset (#42). mreview is CI-only now; CI
+> authenticates with GitLab via a `GITLAB_TOKEN` (PAT, `api` scope)
+> injected into the runner, not via webhook secrets. The notes
+> below are kept for historical reference and for operators
+> auditing older releases.
+
+The `mreview serve` subcommand validated GitLab webhook
 deliveries using `X-Gitlab-Token` (constant-time HMAC compare).
 Treat the secret like any other credential:
 
 - Rotate when operators with access leave the team.
 - Use HTTPS in production.
-- Don't log the secret; `mreview serve`'s logging never echoes
+- Don't log the secret; `mreview serve`'s logging never echoed
   the header value.

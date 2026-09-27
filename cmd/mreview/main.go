@@ -8,13 +8,17 @@
 //
 // Subcommands:
 //
-//	mreview review  — review one merge request and exit
-//	mreview serve   — run an HTTP server that consumes GitLab webhooks
-//	mreview doctor  — validate config + LLM + GitLab connectivity
+//	mreview review     — review one merge request and exit (canonical entrypoint)
+//	mreview doctor    — validate config + LLM + GitLab connectivity
+//	mreview skills-mcp — internal; spawned as a subprocess by the harness
+//	                    library when --skills-repo is set. Hidden from --help.
 //
-// This file wires them together: parses flags, builds the slog logger,
-// dispatches to the matched subcommand, and maps the result to a process
-// exit code.
+// The `mreview serve` webhook-receiver subcommand was removed in the
+// v0.7.0 architecture reset (#42); CI is the canonical run mode.
+//
+// This file wires the public subcommands together: parses flags,
+// builds the slog logger, dispatches to the matched subcommand, and
+// maps the result to a process exit code.
 package main
 
 import (

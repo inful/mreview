@@ -1,8 +1,22 @@
-# docker-compose for local development.
+# Local development companion: runs Ollama with a code-review-tuned
+# model so a developer can run `mreview review` against their own
+# repo on a workstation.
 #
-# Brings up Ollama with a code-review-tuned model + mreview serve.
-# GitLab is presumed to be reachable at GITLAB_URL (point at a real
-# instance or use gitlab-ce in another compose file).
+# Post-#42 architecture note: mreview is CI-only — it does not run
+# as a long-lived daemon. This compose file deliberately does NOT
+# include an `mreview` service. To exercise the bot locally, point
+# the workstation invocation at this Ollama instance:
+#
+#   GITLAB_TOKEN=glpat-... \
+#   mreview review \
+#     --repo=group/project --mr=42 \
+#     --provider=local \
+#     --provider-base-url=http://localhost:11434/v1 \
+#     --workdir=$PWD \
+#     --log-format=json
+#
+# For CI-driven review, use examples/central-ci.yml instead — it
+# owns the producer stages + the mreview stage in one pipeline.
 #
 # Usage:
 #
@@ -12,11 +26,13 @@
 #   2. Pull a model (one-time):
 #        docker compose exec ollama ollama pull qwen2.5-coder:7b
 #
-#   3. Configure GitLab webhook to POST to http://<host>:8080/webhook
-#      with secret token "mysecret".
+#   3. Run `mreview review` from your host shell against the
+#      Ollama service above. The host's `mreview` binary is
+#      installed via `go install github.com/inful/mreview/cmd/mreview@latest`
+#      or pulled from the release artifacts.
 #
-#   4. Watch the logs:
-#        docker compose logs -f mreview
+#   4. Watch the Ollama logs:
+#        docker compose logs -f ollama
 
 services:
   ollama:
@@ -33,35 +49,6 @@ services:
       timeout: 5s
       retries: 5
       start_period: 30s
-    restart: unless-stopped
-
-  mreview:
-    image: ghcr.io/inful/mreview:latest
-    container_name: mreview
-    depends_on:
-      ollama:
-        condition: service_healthy
-    ports:
-      - "8080:8080"
-    environment:
-      # Wire the GitLab + LLM endpoints the mreview image needs.
-      # GITLAB_TOKEN is the Personal Access Token with `api` scope.
-      GITLAB_URL: ${GITLAB_URL:-https://gitlab.com}
-      GITLAB_TOKEN: ${GITLAB_TOKEN:?set GITLAB_TOKEN to a Personal Access Token with api scope}
-      GITLAB_WEBHOOK_SECRET: ${GITLAB_WEBHOOK_SECRET:-mysecret}
-      # The LLM URL inside the docker network is the Ollama
-      # service hostname, not localhost.
-      LLM_URL: http://ollama:11434/v1
-      LLM_MODEL: ${LLM_MODEL:-qwen2.5-coder:7b}
-      # Bot username (optional — improves dedupe accuracy)
-      # GITLAB_BOT_USERNAME: review-bot
-    command:
-      - serve
-      - --addr=:8080
-      - --gitlab-url=${GITLAB_URL:-https://gitlab.com}
-      - --llm-url=http://ollama:11434/v1
-      - --webhook-secret=${GITLAB_WEBHOOK_SECRET:-mysecret}
-      - --log-format=json
     restart: unless-stopped
 
 volumes:

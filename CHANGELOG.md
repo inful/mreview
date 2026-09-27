@@ -4,9 +4,296 @@ All notable changes to mreview are documented here. The format is
 based on [Keep a Changelog](https://keepachangelog.com/), and this
 project adheres to [Semantic Versioning](https://semver.org/).
 
-After v0.1.0, entries are generated from conventional commits by
-GoReleaser. The hand-written entries below document the initial
-release.
+Entries are generated from conventional commits by GoReleaser.
+
+## [0.9.1]
+
+### Fixed
+
+- **Debug image is now usable as a GitLab CI runtime** (#44).
+  The `*:debug` image variant shipped since v0.8.0 was
+  technically a `distroless/cc:debug-nonroot` but its
+  `/usr/bin/sh` was never installed in the runtime stage, so
+  GitLab Runner's `script:` blocks failed with
+  `exec: "/bin/sh": not found`. The debug image now `COPY`s
+  the glibc-clean busybox from
+  `distroless/cc:debug-nonroot`'s `/busybox/busybox` to
+  `/usr/bin/sh`, and also places the mreview binary at
+  `/usr/local/bin/mreview` so CI scripts can call
+  `mreview review ...` without the absolute path.
+
+## [0.9.0]
+
+### Added
+
+- **Bundled skills ship with every binary** (#44). Five
+  review-guidance `.md` files are now embedded via
+  `//go:embed`: `go-review`, `testing-patterns`,
+  `error-handling`, `tokensave-usage`, `skill-authoring`.
+  The `skill-authoring` skill is the meta-circular layout
+  contract — the loader reads it on demand when reviewing
+  MRs that touch a `skills/` directory.
+- **Central skills repo support** (#44). Operators point
+  `--skills-repo` at a GitLab project that hosts `.md`
+  files; the loader merges the bundled set with the
+  central repo and the central repo wins on name collision.
+  Override semantics: drop `go-review.md` in your central
+  repo to replace the bundled default.
+- **`--debug-llm`** flag — prints the raw LLM response to
+  stderr regardless of log level. Useful when the parser
+  drops a finding and you want to see exactly what the
+  model emitted.
+- **`--max-output-tokens`** flag (default `16384`) — bound
+  on each LLM generation request. Raise for verbose
+  chain-of-thought models, lower for tight-budget models.
+- **`--max-turns`** flag (default `6`) — cap on the agent's
+  tool-use loop. Raise for complex MRs, lower for chatty
+  models.
+- **`--no-dedup`** flag — force a fresh review even when a
+  prior bot summary with the same commit SHA already exists
+  on the MR.
+- **Required `--workdir`** flag — the harness previously
+  read the agent's working directory from the operator's
+  CWD, which silently indexed the wrong project and
+  produced ENOENT-loop failures. The flag is now REQUIRED;
+  `runReview` fast-fails with `ExitConfig` if unset.
+  Tokensave is the only file-read path; the harness's
+  local tool registry is empty.
+- **Branch tracking for the MR source branch in
+  tokensave.** Pre-tracks the branch before the harness
+  spawns so the agent's first code-graph query is fast.
+- **WARN on `--workdir` branch vs MR source branch
+  mismatch.** Catches the operator mistake of pointing
+  `--workdir` at a different branch than the MR's source.
+- **Dedup by commit SHA + resolve prior findings.** If a
+  prior mreview summary on the MR carries the current MR
+  HEAD's commit SHA, the LLM run is skipped entirely (the
+  prior review still represents this commit).
+  `--no-dedup` forces a re-run.
+- **Render the summary note as a Markdown table** (no
+  squashed bullets), with the findings list wrapped in
+  `<details><summary>` to keep the MR timeline clean.
+- **`mcp__skills__list_skills` /
+  `mcp__skills__read_skill`** — the skills MCP server
+  exposes the loader's content over stdio to the harness.
+  The harness spawns `mreview skills-mcp` as a subprocess
+  when `--skills-repo` is set.
+- **GitLab repository-files transport** — the skills
+  loader reads `.md` files via `gitlab.Client`'s typed
+  wrapper, sharing the retry / backoff / typed-error
+  plumbing used by every other GitLab call.
+
+### Refactored
+
+- **Replace SHA-256 body fingerprint with `file:line`
+  dedup.** The orchestrator now builds a `<path>:<line>`
+  set from prior unresolved bot findings and suppresses
+  new findings whose key matches. Wording drift between
+  runs no longer causes near-duplicate posts. Resolved
+  prior findings don't count (the operator marked them
+  obsolete, so a re-run is a chance to spot something new
+  at the same location). See
+  [`internal/reviewer/file_line_dedup.go`](internal/reviewer/file_line_dedup.go).
+- **Drop auto-resolve + content fingerprint.** Previously,
+  a new commit auto-resolved any prior finding whose line
+  had moved; that misled operators into thinking the
+  issue was fixed. Resolving now happens only via the
+  operator.
+
+## [0.8.0]
+
+### Added
+
+- **Bundle tokensave in the mreview image** —
+  `Dockerfile` and `Dockerfile.debug` now `COPY` the
+  verified tokensave binary to
+  `/usr/local/bin/tokensave`, pinned to v7.12.1 via build
+  args (`TOKENSAVE_VERSION`, `TOKENSAVE_SHA_AMD64`,
+  `TOKENSAVE_SHA_ARM64`). The CI smoke job
+  (`scripts/tokensave-smoke.sh`) verifies the upstream
+  `SHA256SUMS` matches before the image gets built.
+
+### Fixed
+
+- **Switch runtime base from `distroless/static` to
+  `distroless/cc`.** Tokensave is dynamically linked
+  against glibc + libgcc_s; the static base stripped the
+  dynamic linker and the binary refused to exec with
+  `not found` (the ELF interpreter). The `cc` variant
+  includes glibc + libgcc at the cost of ~30 MB, which
+  buys the tokensave binary plus its runtime libs.
+- **Install `curl` in the Alpine tokensave build stage.**
+  Busybox `wget` has no fail-on-error flag; the GitHub
+  API download needs `-fsSL` semantics to follow
+  redirects and fail on HTTP errors.
+- **Spawn the tokensave MCP server with `serve --path`**
+  instead of the older `mcp --project-root` shape. The
+  v7.12.x CLI rejects the old flag layout. The smoke
+  test (`scripts/tokensave-smoke.sh`) now blocks the
+  build until the contract is corrected and is wired into
+  `.github/workflows/ci.yml` as the `tokensave-smoke`
+  job.
+
+## [0.7.0] — architecture reset (#42)
+
+This release is the breaking-change cutover from the
+pre-reset architecture (webhook receiver + hand-rolled LLM
+loop) to the post-reset architecture (CI-only + harness
+library + tokensave MCP). Every operator upgrading needs
+to re-read the README and rewire their CI.
+
+### Removed
+
+- **`mreview serve`** — the webhook-receiver subcommand
+  is gone. CI is the canonical run mode; central CI
+  definitions handle onboarding (see README → "Onboarding
+  via central CI").
+- **`internal/llm/`** (8 source files + tests) —
+  replaced by the harness library's LLM loop.
+- **`internal/server/`** (10 source files + tests) —
+  webhook receiver, worker pool, queue, throttle. Dead
+  with serve gone.
+- **`cmd/mreview/serve.go`** — dropped from the CLI
+  surface entirely.
+- **`--llm-url`** — renamed to `--provider-base-url`.
+- **`--llm-api-key`** — removed; harness reads
+  provider-specific env vars (`ANTHROPIC_API_KEY`,
+  `OPENAI_API_KEY`, `GOOGLE_API_KEY`, `LITELLM_API_KEY`,
+  `OPENROUTER_API_KEY`).
+- **`--temperature`, `--max-tokens`** — removed; the
+  harness library owns these.
+- **`--max-diff-bytes`, `--max-batch-bytes`,
+  `--per-chunk-timeout`, `--chunk-retries`,
+  `--allow-partial`** — removed; the harness owns
+  chunking.
+- **`examples/webhook-setup.md`,
+  `examples/team-prompt-system.txt`,
+  `examples/team-prompt-user.txt`** — referenced the
+  dropped serve mode or pre-reset CLI flags.
+
+### Added
+
+- **Per-event review guard** (#41) — `internal/event/`.
+  A pure function short-circuits `mreview review` with a
+  clean exit 0 on events that would spam reviews
+  (`merge_request_event` draft, `push`, `trigger`,
+  `pipeline`, `parent_pipeline`, `webide`, `chat`,
+  `ondemand_dast_*`, `security_orchestration_policy`,
+  `external_pull_request_event`). Override via
+  `--on-drafts=run` or `--on-push=run`.
+- **`policy.yaml` enforcement + `ExitPolicy = 8`** —
+  `internal/policy/`. The schema
+  (`severity_overrides`, `forbid`, `require`, `labels`) is
+  loaded and validated at startup; any `error`-verdict
+  finding (or any `forbid` / `require` rule firing) makes
+  the review exit with `8`, distinct from `7`
+  (`ExitInternal`).
+- **CI artifact reuse** (#43) —
+  `internal/ci/artifact/`. The orchestrator reads
+  `build.log`, `test_results.json`, `lint.json`, and
+  `vulns.json` from `--artifacts-dir` (default
+  `.mreview-artifacts`) and threads them into the harness
+  prompt as pre-loaded context. Missing / empty /
+  malformed artifacts are degraded information, not
+  errors.
+- **Tokensave as the primary MCP tool.** The harness
+  agent routes all reads through `mcp__tokensave__*`
+  (`--tokensave-enabled`, default `true`;
+  `--tokensave-bin`, default PATH-resolved `tokensave`).
+  When tokensave is unavailable, the agent falls back to
+  read_file-only mode and the orchestrator logs a
+  warning.
+- **System prompt in
+  `internal/prompts/review_system.md`** — embedded via
+  `//go:embed` with golden-file tests pinning the
+  read-only contract, JSON schema, severity levels,
+  categories, CI artifact references, and policy
+  awareness. Reviewers can now see prompt changes in
+  plain markdown.
+- **`examples/central-ci.yml`** — the reference template
+  for the org-wide onboarding pattern. Producer stages
+  (build / test / lint / vulns / tokensave-sync) +
+  mreview stage in one pipeline.
+
+### Changed
+
+- **CLI is now `mreview review` + `mreview doctor` +
+  `mreview skills-mcp`** (the latter hidden; spawned as
+  a subprocess by the harness).
+- **Provider matrix** is owned by the
+  [harness](https://github.com/sausheong/harness)
+  library. Six providers wired through `--provider`:
+  `anthropic`, `openai`, `gemini`, `litellm`,
+  `openrouter`, `local`.
+- **`config.Defaults()`** sets `gitlab.url`,
+  `provider.base_url`, `provider.model`,
+  `review.bot_username_env`, and
+  `retry.{max_attempts, initial_backoff, max_backoff}` so
+  existing YAML configs keep working without explicit
+  values.
+- **Six LLM-call per-chunk + one merge call**, not one
+  mega-call — the orchestrator chunks by file (with
+  hunk-level splitting for huge files), each chunk fits
+  the model's context, and the merge LLM call writes a
+  single summary paragraph from all per-chunk reviews.
+
+### Refactored
+
+- **`internal/reviewer/` rewritten.** The hand-rolled
+  chunk loop is gone; the orchestrator is a pure Go
+  function (`internal/reviewer/orchestrator.go`) that
+  calls into a `Runner` interface (`HarnessRunner` in
+  production, `FakeRunner` in tests). The harness library
+  owns the LLM loop, streaming, prompt caching, MCP
+  connection lifecycle, and session persistence.
+- **`cmd/mreview/main.go`'s `applyConfigToEnv`** is
+  table-driven — the bindings are listed once and each
+  entry's `get` function returns the value to set.
+- **Read-only contract enforced by tests.** The
+  harness's bash / edit_file / write_file tools are
+  imported only by tests that prove they aren't
+  registered; mreview never references them in
+  production code.
+
+## [0.6.0]
+
+### Added
+
+- **`--workers N`** flag on `mreview serve` for the
+  worker-pool concurrency cap (#39). Steady-state
+  concurrency (number of simultaneous review goroutines).
+  Distinct from `queue_size` which is the burst buffer.
+  Lower for slow / shared LLMs; raise for batched / fast
+  inference.
+
+### Refactored
+
+- **Extract `buildClients` helper** shared by `review` and
+  `serve` (#37). Both subcommands previously assembled the
+  GitLab + LLM client triples independently; the helper
+  eliminates the duplication.
+- **Drop pointless wrappers, magic numbers, wrong
+  comments, and a stale stub** across `cmd/mreview`,
+  `internal/llm`, and `internal/server` (#38). Cleanup in
+  service of the upcoming architecture reset (#42).
+
+## [0.5.1]
+
+### Fixed
+
+- **Wire the upstream `Retry-After` header into the retry
+  backoff** (#36). The retry path's `retryAfterDuration`
+  only read `e.Body` — every 503 / 429 with a `Retry-After`
+  hint effectively went unheeded. `(*Client).classify` now
+  captures the upstream header on `*Error.RetryAfter`;
+  `retryAfterDuration` prefers the header (via the
+  canonical `parseRetryAfterHeader`, handling
+  delta-seconds and HTTP-date forms) and falls back to
+  the body for old hand-constructed errors.
+- **Drop the unused `config.MustEnv` helper.** It was
+  exported, tested in the same package, and never called
+  by any production code. The package is `internal/`, so
+  no external embedder can be depending on it.
 
 ## [0.5.0]
 
@@ -336,7 +623,14 @@ The AGPL network clause applies: anyone running a modified
 mreview as a service that others interact with over a network
 must provide the source of their modifications to those users.
 
-[Unreleased]: https://github.com/inful/mreview/compare/v0.5.0...HEAD
+
+[Unreleased]: https://github.com/inful/mreview/compare/v0.9.1...HEAD
+[0.9.1]: https://github.com/inful/mreview/compare/v0.9.0...v0.9.1
+[0.9.0]: https://github.com/inful/mreview/compare/v0.8.0...v0.9.0
+[0.8.0]: https://github.com/inful/mreview/compare/v0.7.0...v0.8.0
+[0.7.0]: https://github.com/inful/mreview/compare/v0.6.0...v0.7.0
+[0.6.0]: https://github.com/inful/mreview/compare/v0.5.1...v0.6.0
+[0.5.1]: https://github.com/inful/mreview/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/inful/mreview/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/inful/mreview/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/inful/mreview/compare/v0.3.1...v0.4.0

@@ -2,7 +2,6 @@
 #
 # Load this file with:
 #     mreview --config=/etc/mreview/config.yaml review --repo=... --mr=...
-#     mreview --config=/etc/mreview/config.yaml serve --addr=...
 #
 # mreview also looks for this file at the default location
 # ~/.config/mreview/config.yaml when --config (and MREVIEW_CONFIG)
@@ -11,13 +10,17 @@
 # Behavior:
 #   - Values from this file populate env vars before flag parsing.
 #   - CLI flags always win over config values.
-#   - Secret fields (token_env, api_key_env, etc.) reference
-#     env-var NAMES — never store the secret itself in this file.
-#     The loader copies the value from the named env var into
-#     the env var the CLI flag expects (GITLAB_TOKEN, LLM_API_KEY,
-#     etc.) so the existing env:"" tag wiring keeps working.
+#   - Secret fields (token_env, etc.) reference env-var NAMES —
+#     never store the secret itself in this file. The loader
+#     copies the value from the named env var into the env var
+#     the CLI flag expects (GITLAB_TOKEN, etc.) so the existing
+#     env:"" tag wiring keeps working.
 #
-# Schema mirrors every flag in `mreview {review,serve,doctor} --help`.
+# Schema mirrors every flag in `mreview review --help`. The
+# architecture reset (#42) collapsed the old `llm:` / `review:`
+# fields; only the post-reset surface is documented here.
+# `llm_presets` / `llm_preset_by_model` are kept as a deprecated
+# stub so existing configs keep parsing — see the trailing block.
 
 gitlab:
   # Base URL for the GitLab API. For self-hosted GitLab, point at
@@ -30,78 +33,27 @@ gitlab:
   # Required scope: api (full read/write).
   token_env: GITLAB_TOKEN
 
-llm:
-  # OpenAI-compatible /v1 endpoint.
-  #   - Ollama:        http://localhost:11434/v1   (or just :11434; /v1 auto-appended)
-  #   - llama.cpp:     http://localhost:8080/v1
-  #   - LM Studio:     http://localhost:1234/v1
-  #   - vLLM:          http://localhost:8000/v1
+provider:
+  # Provider base URL. Required for litellm / local; ignored for
+  # hosted providers. The harness library owns the wire format.
+  #   - Anthropic:        (hosted, no base URL needed)
+  #   - OpenAI:           (hosted, no base URL needed)
+  #   - Gemini:           (hosted, no base URL needed)
+  #   - LiteLLM proxy:    http://your-litellm:4000/v1
+  #   - OpenRouter:       (hosted, no base URL needed)
+  #   - Local (Ollama):   http://localhost:11434/v1
   base_url: http://localhost:11434/v1
 
-  # Bearer token. Most local servers accept any value or ignore
-  # the header entirely. Set when running against OpenAI proper.
-  api_key_env: LLM_API_KEY
-
-  # Model name. Must be available on the server (verify with
-  # `mreview doctor`).
+  # Model name. Must be available on the provider
+  # (verify with `mreview doctor`).
   model: qwen2.5-coder:7b
 
 review:
-  # Per-chunk byte budget. Files exceeding this return OversizedError
-  # and the operator must split the MR.
-  max_diff_bytes: 200000
-
-  # Per-LLM-call timeout.
-  per_chunk_timeout: 120s
-
-  # LLM sampling temperature (0.0 = deterministic, 2.0 = chaotic).
-  # Lower values produce more focused reviews; higher values surface
-  # more speculative findings.
-  temperature: 0.2
-
-  # LLM max output tokens per call.
-  max_tokens: 2048
-
   # Bot username for the dedupe layer. When set, only the bot's
-  # prior comments count toward the fingerprint baseline; human
+  # prior comments count toward the dedup baseline; human
   # comments are ignored. When empty, every existing comment is
   # treated as a duplicate candidate (more conservative).
   bot_username_env: GITLAB_BOT_USERNAME
-
-  # Chunk-level retry budget for transient LLM errors (per-call
-  # timeouts). When 0 the reviewer default (1 retry = 2 total
-  # attempts per chunk) applies. Negative is rejected.
-  chunk_retries: 1
-
-  # When false (default), ANY chunk that fails after retries
-  # aborts the whole review — no summary note, no inline
-  # discussion, and the CLI exits non-zero. Half a review is worse
-  # than no review: the operator re-runs rather than trusting a
-  # half-completed report. Set true to opt into the old
-  # "log + substitute empty response" behaviour, useful on big MRs
-  # where one bad chunk isn't worth aborting the whole run.
-  allow_partial: false
-
-server:
-  # HTTP listen address for `mreview serve`.
-  addr: ":8080"
-
-  # Webhook shared secret. MUST match the "Secret token" field in
-  # the GitLab project's webhook settings.
-  webhook_secret_env: GITLAB_WEBHOOK_SECRET
-
-  # Worker pool queue depth. When the queue is full, incoming
-  # webhook events get HTTP 503 so GitLab retries later.
-  queue_size: 32
-
-  # Steady-state concurrency cap (number of simultaneous review
-  # goroutines). Distinct from queue_size, which is the burst
-  # buffer. Lower for slow / shared LLMs; raise for batched /
-  # fast inference. Uncomment to override the default (4).
-  # workers: 4
-
-  # Graceful shutdown drain timeout.
-  shutdown_timeout: 30s
 
 retry:
   # GitLab API retry policy (transient errors only).
@@ -117,14 +69,9 @@ retry:
 # patch any bundled skill by putting a same-named .md here.
 #
 # Each skill is one .md file under <repo>/<directory>/. The
-# loader reads the YAML `description:` frontmatter field as
-# the value that surfaces in mcp__skills__list_skills; bodies
-# are passed to the agent verbatim when read_skill is called.
-#
-# Example skill content:
-#   - "always flag N+1 queries against our Postgres models"
-#   - "our error wrapping is %w, not plain fmt.Errorf"
-#   - "tests live next to the code they test"
+# loader reads the YAML `description:` frontmatter field as the
+# value that surfaces in mcp__skills__list_skills; bodies are
+# passed to the agent verbatim when read_skill is called.
 #
 # Disabled when `repo_path` is absent — only the bundled set
 # applies, with no surprise outbound calls against a public
@@ -136,48 +83,31 @@ retry:
 #   ref: main                          # default; pin a SHA for reproducibility
 #   token_env: GITLAB_TOKEN            # default; reuse the review token
 
-# Per-LLM model presets. When the running --model matches an entry
-# in llm_preset_by_model, the named preset's context_window drives
-# the derived --max-batch-bytes value, and per_chunk_timeout takes
-# effect when the CLI flag isn't set. This lets one config serve
-# multiple models without per-invocation flag wrangling.
+# ─── DEPRECATED ────────────────────────────────────────────────────
+# `llm_presets` / `llm_preset_by_model` were the hand-rolled
+# LLM-loop's mechanism for deriving packing budgets. After the
+# architecture reset (#42), the harness library owns prompt-cache
+# discipline and the provider matrix. The preset layer is kept
+# as a stub so existing YAML configs keep parsing, but it's no
+# longer used to size the work. The harness library's own preset
+# layer will replace it.
 #
-# The byte budget is derived as:
-#   max_batch_bytes = (context_window - 1500 - max_tokens - 15% safety) * 4
+# Existing block, retained verbatim for compatibility:
 #
-# CLI flags always win; presets fill in when CLI values are unset.
-# Lookup is strict (exact model name match), no prefix magic.
-llm_presets:
-  # 168k-context local model. Derives ~520 KB packing budget.
-  opus-local:
-    context_window: 168000
-    per_chunk_timeout: 15m
-
-  # 80k-context model. Derives ~228 KB packing budget.
-  gemma-26b-e4b:
-    context_window: 80000
-    per_chunk_timeout: 5m
-
-  # Reasoning-capable model. The reasoning_effort field is
-  # forwarded to the OpenAI-compatible endpoint as
-  # `reasoning_effort: high` (no-op for providers / models that
-  # don't honour the field).
-  o-series:
-    context_window: 200000
-    per_chunk_timeout: 15m
-    reasoning_effort: high
-
-  # Coding agent. Effective context is smaller than the advertised
-  # 168k window; the max_batch_bytes override pins batch size to a
-  # value the model can process within per_chunk_timeout. Tune by
-  # running with --max-batch-bytes=N and seeing what completes.
-  coding-agent:
-    context_window: 168000
-    per_chunk_timeout: 5m
-    max_batch_bytes: 3000
-
-llm_preset_by_model:
-  "qwen2.5-coder:7b": opus-local
-  "gemma-26b-e4b":    gemma-26b-e4b
-  "o3-mini":          o-series
-  "coding-agent":     coding-agent
+# llm_presets:
+#   opus-local:
+#     context_window: 168000
+#     per_chunk_timeout: 15m
+#   o-series:
+#     context_window: 200000
+#     per_chunk_timeout: 15m
+#     reasoning_effort: high
+#   coding-agent:
+#     context_window: 168000
+#     per_chunk_timeout: 5m
+#     max_batch_bytes: 3000
+#
+# llm_preset_by_model:
+#   "qwen2.5-coder:7b": opus-local
+#   "o3-mini":          o-series
+#   "coding-agent":     coding-agent

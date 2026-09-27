@@ -62,9 +62,24 @@ itself. mreview only forwards three pieces to the harness:
 The per-provider API-key env vars (`ANTHROPIC_API_KEY`,
 `OPENAI_API_KEY`, `GOOGLE_API_KEY`, `LITELLM_API_KEY`,
 `OPENROUTER_API_KEY`) are read by the harness library directly. mreview
-just passes the values through. To add a new provider, add the
-provider name to the enum in `cmd/mreview/review.go` and wire the
-new key lookup into `providerAPIKey` in the same file.
+just passes the values through.
+
+> **Why does mreview still maintain a provider enum if harness
+> owns the matrix?** Two reasons: (1) kong's CLI parser needs
+> an `enum:` constraint on `--provider` so unknown names
+> produce a clean parse error before any harness call; (2) the
+> `providerAPIKey` lookup in `cmd/mreview/review.go` (which
+> reads the per-provider env var) is the only piece of mreview
+> code that *names* providers — harness's own dispatcher is
+> provider-agnostic.
+
+To add a new provider, two edits:
+
+1. Add the provider name to the `enum:` tag on `Provider` in
+   `cmd/mreview/review.go` (the kong constraint).
+2. Add a case to `providerAPIKey(...)` in the same file,
+   returning `os.Getenv("NEW_PROVIDER_API_KEY")` for the new
+   name.
 
 The OpenAI-compatible backend (`--provider=local`) covers Ollama /
 llama.cpp / vLLM / LM Studio via a base URL swap, so most
@@ -92,6 +107,7 @@ cmd/mreview/             kong wiring, exit codes, subcommand dispatch
 internal/gitlab/         Typed wrapper around client-go (incl. repository-files transport)
 internal/event/          Per-event guard (issue #41): draft + push skip
 internal/policy/         policy.yaml enforcement (issue #42 step 2)
+internal/git/            Tiny `git` CLI shim for branch / worktree reads
 internal/diff/           Diff chunker (file + hunk splitting)
 internal/ci/artifact/    CI artifact loaders (issue #43)
 internal/prompts/        System prompt (//go:embed) + user prompt renderer

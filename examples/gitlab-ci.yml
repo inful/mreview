@@ -125,9 +125,16 @@ tokensave-sync:
 # not in the YAML's `rules:`. The CI YAML's rules filter
 # when mreview is invoked; mreview's internal guard handles
 # the rest. See README → "Behaviour by event".
+#
+# Image selection: the *-debug variant carries a shell
+# (/usr/bin/sh resolves via /bin -> usr/bin symlink; busybox
+# statically linked against glibc) so the script: block below
+# can invoke `mreview review`. The production :latest image is
+# distroless with no shell, which fails GitLab Runner with
+# `exec: "/bin/sh": not found` on script: blocks.
 mreview:
   stage: review
-  image: ghcr.io/inful/mreview:latest
+  image: ghcr.io/inful/mreview:latest-debug
   variables:
     LLM_URL: http://localhost:11434/v1
     LLM_MODEL: qwen2.5-coder:7b

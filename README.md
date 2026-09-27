@@ -6,7 +6,7 @@ driven LLM agent (with [tokensave](https://tokensave.dev/) as its primary
 code-graph tool), and posts the result back to the MR as inline line
 comments plus a summary thread.
 
-Architecture reset as of v0.6.0 ([#42](https://github.com/inful/mreview/issues/42)):
+Architecture reset as of v0.7.0 ([#42](https://github.com/inful/mreview/issues/42)):
 mreview is now a CI-only orchestrator with a strictly read-only agent
 tool surface. The `mreview serve` mode is dropped; CI is the canonical
 run mode, and the central CI definition (the example in
@@ -61,9 +61,11 @@ https://gitlab.example.com/group/project/-/merge_requests/42
   driven by your central CI template. No long-lived daemon, no
   webhook receiver, no per-repo wiring.
 - **Strictly read-only agent.** The harness agent has access to
-  `read_file` plus the [tokensave](https://tokensave.dev/) MCP server
-  for code-graph queries — nothing else. No shell, no write tools, no
-  re-running CI commands. The contract is enforced by tests in
+  the [tokensave](https://tokensave.dev/) MCP server
+  (`mcp__tokensave__read` for raw file reads plus the full
+  smart-context / semantic-search / impact-analysis surface) —
+  nothing else. No shell, no write tools, no re-running CI
+  commands. The contract is enforced by tests in
   `internal/reviewer/readonly_test.go` and
   `internal/prompts/review_test.go`.
 - **Language-agnostic.** tokensave handles symbol extraction, blast
@@ -105,12 +107,13 @@ https://gitlab.example.com/group/project/-/merge_requests/42
 │   2. Read policy.yaml ──────────► │   OpenRouter / Local    │    │
 │                                  │                         │    │
 │   3. Fetch MR + diff from  ────► │  Tools:                  │    │
-│      GitLab (gitlab client)      │   read_file              │    │
-│                                  │   mcp__tokensave__*      │    │
+│      GitLab (gitlab client)      │   mcp__tokensave__*      │    │
+│                                  │     read                 │    │
 │   4. Build user prompt:          │     smart_context        │    │
 │      MR metadata + diff          │     semantic_search      │    │
 │      chunks + artifact           │     impact_analysis      │    │
-│      block + policy hints        │                         │    │
+│      block + policy hints        │     + full tokensave     │    │
+│                                  │       surface            │    │
 │                                  │  Loop:                   │    │
 │   5. Run harness ────────────────► │   think → tool call →   │    │
 │                                  │   think → ... → emit    │    │
@@ -170,8 +173,8 @@ go install github.com/inful/mreview/cmd/mreview@latest
 
 ```bash
 # 1. Verify your wiring before posting anything to GitLab.
-mreview doctor --skip-provider   # GitLab check (needs $GITLAB_TOKEN)
-mreview doctor --skip-gitlab     # provider check (needs running Ollama / etc.)
+mreview doctor --skip-provider   # GitLab check only (needs $GITLAB_TOKEN)
+mreview doctor --skip-gitlab     # provider check only (needs a running Ollama / etc.)
 
 # 2. Dry-run a real review. Logs every harness call + GitLab
 #    post it WOULD make, without actually posting. Cheap, safe, fast.
@@ -232,7 +235,7 @@ Flags:
                                                    primary code-graph tool). Default true.
       --tokensave-bin=STRING                     Path to the tokensave binary (default: PATH-resolved
                                                    'tokensave'). Used when --tokensave-enabled=true.
-      --artifacts-dir=STRING                     Directory containing CI artifacts (build.log,
+--artifacts-dir=STRING                     Directory containing CI artifacts (build.log,
                                                    test_results.json, lint.json, vulns.json).
                                                    Default .mreview-artifacts.
       --policy-file=STRING                       Path to a YAML policy file (severity_overrides,
@@ -246,6 +249,16 @@ Flags:
       --bot-username=STRING                      Bot username for dedupe ($GITLAB_BOT_USERNAME).
       --retries=3                                GitLab API retry attempts on transient errors.
       --retry-backoff=500ms                      Initial retry backoff; exponential with jitter.
+      --max-output-tokens=16384                  Per-LLM-call max_tokens sent to the provider.
+                                                    Raise for verbose chain-of-thought models;
+                                                    lower for tight-budget models.
+      --max-turns=6                              Cap on the agent's tool-use loop. Raise for
+                                                    complex MRs, lower for chatty models.
+      --debug-llm                                Print the raw LLM response to stderr (regardless
+                                                    of log level). Useful when parse fails.
+      --no-dedup                                 Force a fresh review even when a prior bot
+                                                    summary with the same commit SHA exists on
+                                                    the MR. Default false (same-SHA skip).
       --dry-run                                  Log intended GitLab posts without performing them.
       --log-format=text                          Log output format (text | json).
       --verbose                                  Enable debug logging.
@@ -325,11 +338,9 @@ table mirrors GitLab's [predefined CI variables][gitlab-ci-vars]:
 the guard emits a one-line `Debug`-level log line with the reason
 (use `--verbose` to see it).
 
-**Why a guard at all?** mreview supports both CI and `mreview serve`
-modes today. When the project moves to CI-first review (per the
-[architecture reset](https://github.com/inful/mreview/issues/42)),
-a stray invocation from a `trigger:` child pipeline or a `webide`
-launch would otherwise spam reviews on every code edit. The guard
+**Why a guard at all?** Stray invocations from a `trigger:`
+child pipeline, a `webide` launch, or a `chat` job would
+otherwise spam reviews on every code edit. The guard
 short-circuits those paths with a deterministic `exit 0`.
 
 **Local invocation.** When `CI_PIPELINE_SOURCE` is unset (a developer
@@ -473,14 +484,13 @@ The bot posts **nothing** when:
 - Every finding is deduped against the bot's prior comments — no
   new comments to post. The summary also stays silent in this case
   (see the `update`-skip behavior).
-- Any chunk's LLM call fails after the retry budget is exhausted.
-  By default (`--allow-partial=false`) the whole review aborts
-  with exit code 7 — no summary note, no inline discussion. The
-  log carries the batch index, file list, and underlying error;
-  operators re-run rather than trusting a half-completed report.
-  Pass `--allow-partial=true` to restore the legacy "log a warn
-  and substitute empty findings" path, useful on big MRs where
-  one bad chunk isn't worth aborting.
+- The harness agent's LLM call fails (transport error, non-zero
+  exit after the retry budget is exhausted, or the configured
+  `MaxTurns` is reached without emitting the findings JSON).
+  The review aborts with exit code 7 — no summary note, no inline
+  discussion. The log carries the chunk index, file list, attempt
+  count, and underlying error; operators re-run rather than
+  trusting a half-completed report.
 
 Operators running with `--dry-run` see every post *attempted* in
 the logs (with body and URL) without anything actually landing on
@@ -506,19 +516,31 @@ so it can report failures).
 
 ## Read-only tool surface
 
-The harness agent has **exactly** these tools registered:
+The harness agent has the **full tokensave** MCP surface
+registered under `mcp__tokensave__*`. The four tools the system
+prompt names explicitly (see
+[`internal/prompts/review_system.md`](internal/prompts/review_system.md))
+are:
 
 | Tool | Purpose |
 |------|---------|
-| `read_file` | Read raw source / config files |
+| `mcp__tokensave__read` | Read raw source / config files (replaces the harness `read_file`; routes everything through tokensave's index) |
 | `mcp__tokensave__smart_context` | Code-graph queries ("what does this code do / what depends on it") |
 | `mcp__tokensave__semantic_search` | Semantic search across the repo |
 | `mcp__tokensave__impact_analysis` | Blast radius ("if I change this, what breaks") |
 
+Plus the rest of the tokensave surface on demand:
+`mcp__tokensave__search`, `mcp__tokensave__body`,
+`mcp__tokensave__callers`, `mcp__tokensave__callees`,
+`mcp__tokensave__similar`, `mcp__tokensave__context`, etc. —
+anything tokensave exposes for the indexed repo.
+
 The agent does **not** have:
 
 - shell / bash
-- write_file / edit_file
+- write_file / edit_file (the harness library's local
+  tool registry is empty — the read path goes through
+  tokensave, not through harness's built-in tools)
 - any tool that mutates the working directory
 
 This is the read-only contract enforced by tests in
@@ -844,12 +866,13 @@ works standalone.
 
 Use the preset field when the model's effective context is smaller than its advertised window — common for heavily quantized local models that return empty content (rather than timing out) on prompts technically within the byte budget.
 
-The optional `reasoning_effort` field on a preset (or the matching
-`--reasoning-effort` CLI flag) controls the reasoning budget for
-o-series-style models — OpenAI's o1/o3, Azure AI Foundry, Groq,
-Together, and any other provider that proxies them. Allowed
-values are `low`, `medium`, `high`. Local non-reasoning models and
-non-supporting providers ignore the field on the wire.
+The optional `reasoning_effort` field on a preset controls
+the reasoning budget for o-series-style models — OpenAI's o1/o3,
+Azure AI Foundry, Groq, Together, and any other provider that
+proxies them. Allowed values are `low`, `medium`, `high`.
+Local non-reasoning models and non-supporting providers ignore
+the field on the wire. (There is no `--reasoning-effort` CLI
+flag in this release; tune via the YAML preset.)
 
 ## Customizing the prompts
 
@@ -896,6 +919,13 @@ schema, change the severity values, ask for non-JSON output,
 or rename the response fields. Doing any of those would break
 the parser. The system prompt's contract is locked in by tests.
 
+> **Removed in v0.7.0.** The pre-reset architecture exposed
+> `--system-prompt-file` / `--user-prompt-file` for layering
+> team guidance on top of the system prompt. The architecture
+> reset dropped those flags; the system prompt is owned by
+> [`internal/prompts/review_system.md`](internal/prompts/review_system.md)
+> and pinned by golden-file tests.
+
 **Skills are a softer customization path.** Skills are
 team-authored review guidance (`.md` files) the agent reads
 on demand via two MCP tools — without touching the prompt
@@ -910,9 +940,9 @@ every release and a central repo can augment them.
 | `--gitlab-url`                | `GITLAB_URL`                  | `https://gitlab.com`             |
 | `--gitlab-token`              | `GITLAB_TOKEN`                | (required)                       |
 | `--provider`                  | `MREVIEW_PROVIDER`            | `local`                          |
-| `--provider-base-url`         | `MREVIEW_PROVIDER_BASE_URL`   | empty                            |
+| `--provider-base-url`         | `MREVIEW_PROVIDER_BASE_URL`   | `http://localhost:11434/v1` (set by `config.Defaults()`) |
 | `--model`                     | `MREVIEW_MODEL`               | `qwen2.5-coder:7b`               |
-| `--workdir`                   | `MREVIEW_WORKDIR`             | empty (defaults to repo root)     |
+| `--workdir`                   | `MREVIEW_WORKDIR`             | **REQUIRED** (no default — review aborts with ExitConfig if unset) |
 | `--tokensave-enabled`         | `MREVIEW_TOKENSAVE_ENABLED`   | `true`                           |
 | `--tokensave-bin`             | `MREVIEW_TOKENSAVE_BIN`       | `tokensave` (`PATH` lookup; the Docker image has it at `/usr/local/bin/tokensave`) |
 | `--artifacts-dir`             | `MREVIEW_ARTIFACTS_DIR`       | `.mreview-artifacts`             |
@@ -920,12 +950,16 @@ every release and a central repo can augment them.
 | `--skills-repo`               | `MREVIEW_SKILLS_REPO`         | empty (disables the central skills MCP server) |
 | `--skills-dir`                | `MREVIEW_SKILLS_DIR`          | `skills`                          |
 | `--skills-ref`                | `MREVIEW_SKILLS_REF`          | `main`                            |
-| `--skills-token-env`          | `MREVIEW_SKILLS_TOKEN_ENV`    | reuses `--gitlab-token-env` (typically `GITLAB_TOKEN`) |
+| `--skills-token-env`          | `MREVIEW_SKILLS_TOKEN_ENV`    | reuses the env var from `--gitlab-token` (typically `GITLAB_TOKEN`) |
 | `--on-drafts`                 | `MREVIEW_ON_DRAFTS`           | `skip`                           |
 | `--on-push`                   | `MREVIEW_ON_PUSH`             | `skip`                           |
 | `--bot-username`              | `GITLAB_BOT_USERNAME`         | empty (all comments count)       |
 | `--retries`                   | `MREVIEW_RETRIES`             | `3`                              |
 | `--retry-backoff`             | `MREVIEW_RETRY_BACKOFF`       | `500ms`                          |
+| `--max-output-tokens`         | `MREVIEW_MAX_OUTPUT_TOKENS`   | `16384`                          |
+| `--max-turns`                 | `MREVIEW_MAX_TURNS`           | `6`                              |
+| `--debug-llm`                 | (no env)                      | `false` (raw LLM response → stderr) |
+| `--no-dedup`                  | `MREVIEW_NO_DEDUP`            | `false` (skip the LLM when a bot summary with this commit SHA already exists) |
 | `--dry-run`                   | (no env)                      | `false`                          |
 | `--log-format`                | (no env)                      | `text`                           |
 | `--verbose`                   | (no env)                      | `false`                          |
@@ -933,43 +967,8 @@ every release and a central repo can augment them.
 
 ## Architecture
 
-```
-┌──────────────────────────────────────────────────────────────────┐
-│  Central CI pipeline (one stage per producer + one for mreview)  │
-│                                                                  │
-│   go-build      ──┐                                             │
-│   go-test       ──┤                                             │
-│   golangci-lint  ─┼─→ .mreview-artifacts/                       │
-│   govulncheck   ──┤   build.log                                  │
-│   tokensave sync ┘   test_results.json                          │
-│                     lint.json                                   │
-│                     vulns.json                                   │
-│                                                                  │
-│                                  ┌─────────────────────────┐    │
-│   mreview  ←────────────────────┤  Harness Runtime         │    │
-│   (orchestrator + reviewer)      │                         │    │
-│                                  │  Provider:              │    │
-│   1. Read CI artifacts  ────────► │   Anthropic / OpenAI /  │    │
-│                                  │   Gemini / LiteLLM /    │    │
-│   2. Read policy.yaml ──────────► │   OpenRouter / Local    │    │
-│                                  │                         │    │
-│   3. Fetch MR + diff from  ────► │  Tools:                  │    │
-│      GitLab (gitlab client)      │   read_file              │    │
-│                                  │   mcp__tokensave__*      │    │
-│   4. Build user prompt:          │     smart_context        │    │
-│      MR metadata + diff          │     semantic_search      │    │
-│      chunks + artifact           │     impact_analysis      │    │
-│      block + policy hints        │                         │    │
-│                                  │  Loop:                   │    │
-│   5. Run harness ────────────────► │   think → tool call →   │    │
-│                                  │   think → ... → emit    │    │
-│   6. Apply policy.Enforce()  ◄───│   findings JSON         │    │
-│   7. Dedupe vs existing     ◄────┘                         │    │
-│      GitLab discussions                                         │
-│   8. Post summary + inline  ────► GitLab API                  │
-│      findings                                                  │
-└──────────────────────────────────────────────────────────────────┘
-```
+> **Note:** the ASCII diagram in [How it works](#how-it-works)
+> above shows the same flow as this section. Read it there.
 
 `mreview review` is the only entrypoint. The orchestrator is a
 pure Go function — no goroutines, no plugin discovery, no event
@@ -992,6 +991,11 @@ internal/event/          Per-event guard (issue #41):
 internal/policy/         policy.yaml enforcement (issue #42 step 2):
                           severity_overrides / forbid / require /
                           labels. Strict validation + Enforce().
+internal/git/            Tiny `git` CLI shim. Reads branch / worktree
+                          state for the workdir-branch vs MR-source-branch
+                          guard. Graceful no-op when `git` is not on
+                          PATH (the distroless runtime image doesn't
+                          bundle it by design); local dev still has it.
 internal/diff/           Diff chunker (preserved from the old
                           internal/llm/). Language-agnostic; takes a
                           tiny Source interface so ChangeFile
@@ -1074,35 +1078,28 @@ doesn't have the cross-chunk context, so the consolidate step
 gives it. If the merge call fails (transient), we fall back to
 concatenating per-chunk summaries so the user still gets something.
 
-**Body-hash dedupe, not (file, line, body).** Re-running the bot on
-an unchanged MR should be a no-op. We use SHA-256 of the
-normalized finding body as the fingerprint. This is robust to
-trivial edits (extra whitespace, line-wrapping) but a known
-weakness: a substantive rewrite of the same finding produces a
-different fingerprint and the bot posts a near-duplicate. The
-plan to fix this involves parsing `note.position.{new_path,
-new_line}` out of GitLab's discussions API and combining into the
-fingerprint — deferred until users complain about duplicate noise.
-
-**Constant-time HMAC compare.** Webhook auth uses
-`crypto/subtle.ConstantTimeCompare` so the secret doesn't leak
-byte-by-byte through timing. We also compare against a same-length
-string when lengths differ, so the wall-clock cost is independent
-of whether the lengths match.
-
-**Bounded worker pool.** Four goroutines, channel-buffered queue,
-HTTP 503 on queue-full. GitLab retries 5xx with exponential
-backoff, so saturation signals "try again later" without losing
-events. A per-MR webhook throttle (default 30 s) prevents
-rapid-fire duplicate deliveries from queueing at all.
+**`file:line` dedupe.** Re-running the bot on the same MR
+shouldn't pile up comments at the same location. Before posting,
+the orchestrator walks the MR's existing discussions, builds a
+set of `<path>:<line>` keys for every prior bot-authored inline
+finding that hasn't been resolved, and suppresses any new finding
+whose key matches. Resolved prior findings don't count — the
+operator marked them obsolete (or accepted them), so a re-run is
+a chance to spot something new at the same location. The
+implementation lives in
+[`internal/reviewer/file_line_dedup.go`](internal/reviewer/file_line_dedup.go).
+Wording drift between runs doesn't change whether a finding is
+"the same"; the only signal is "did the operator already see
+this location?". Prior implementations used SHA-256 of the
+finding body; that was retired because a substantive rewrite
+of the same finding produced a different fingerprint and the bot
+posted near-duplicates.
 
 **`context.Context` everywhere.** Every blocking call in the
-reviewer and the server takes a context. SIGINT/SIGTERM cancels
-the root context, the worker pool drains in-flight jobs, the HTTP
-server does `Shutdown(ctx)` for graceful drain, and any in-flight
-LLM call (which is the longest pole) gets a `request canceled`
-signal so we don't keep burning GPU on a request the operator
-just killed.
+reviewer takes a context. SIGINT/SIGTERM cancels the root
+context, and any in-flight LLM call (which is the longest pole)
+gets a `request canceled` signal so we don't keep burning GPU
+on a request the operator just killed.
 
 ## Performance & cost
 
@@ -1113,8 +1110,7 @@ hardware it runs on, and the shape of your MRs.
 
 The prompt uses a chars/4 heuristic to estimate tokens (no
 per-model tokenizer — keep the binary small). Rough per-review
-budget for a **500-line MR across 5 files** with the default
-`--max-diff-bytes=200000` (i.e. one chunk per file):
+budget for a **500-line MR across 5 files** (one chunk per file):
 
 | Component | Tokens (input) | Tokens (output) |
 |---|---|---|
@@ -1184,10 +1180,10 @@ honored up to a 60-second cap (longer values get clipped).
 
 | Symptom | Fix |
 |---|---|
-| Reviews take minutes per MR | Smaller model (7B → 3B); faster hardware; lower `--max-diff-bytes` |
-| Harness agent loops too long | Lower `MaxTurns` in the AgentSpec (currently 10); shorten the system prompt |
-| Bot posts near-duplicate findings across pushes | Dedupe is already on `(file, line, body)`; tune the bot-username filter (`--bot-username`) |
-| LLM OOMs on a chunk | Lower `--max-tokens`; use a smaller context window |
+| Reviews take minutes per MR | Smaller model (7B → 3B); faster hardware |
+| Harness agent loops too long | Lower `--max-turns` (default 6); shorten the system prompt |
+| Bot posts near-duplicate findings across pushes | Dedupe is already on `file:line`; tune the bot-username filter (`--bot-username`); pass `--no-dedup` to force a re-review |
+| LLM OOMs on a chunk | Lower `--max-output-tokens` (default 16384); use a smaller context window |
 
 ## Development
 
@@ -1238,7 +1234,7 @@ ensure it has the `api` scope (not `read_api`).
 
 ```bash
 # Quick sanity check:
-GITLAB_TOKEN=glpat-xxx mreview doctor --skip-llm
+GITLAB_TOKEN=glpat-xxx mreview doctor --skip-provider
 ```
 
 ### "transient failure (retries exhausted)" on every inline discussion (summary still posts)
@@ -1266,11 +1262,14 @@ verify the server is listening on the configured `--llm-url`.
 
 ### "diff too large to chunk: ..."
 
-A single file's diff exceeds `--max-diff-bytes` (default 200 KB). Options:
+The diff chunker (`internal/diff`) refuses a file whose hunks
+would blow past the model's effective context. The harness
+library reports it as `OversizedError`. Options:
 
-- Raise the budget: `--max-diff-bytes=500000`.
 - Split the MR (smaller MRs = better reviews regardless).
-- File an issue with the diff and let a human review the offending file.
+- Use a model with a larger context window.
+- File an issue with the diff and let a human review the
+  offending file.
 
 ### "line out of range" warnings in logs
 
