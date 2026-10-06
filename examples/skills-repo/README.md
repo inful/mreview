@@ -121,3 +121,8 @@ mreview review --repo=foo/bar --mr=42 \
   the original design discussion.
 - mreview's bundled skills: `internal/skills/bundled/*.md` in the
   mreview source tree.
+- [`examples/skills-gitlab-ci.yml`](../skills-gitlab-ci.yml) —
+  the meta-circular review pipeline: drop this in the root of
+  *this* repo so MRs that touch skill files get reviewed against
+  the bundled `skill-authoring` skill (layout, frontmatter,
+  description, body length, override semantics).

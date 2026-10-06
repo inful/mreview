@@ -1,0 +1,162 @@
+# GitLab CI integration for the central mreview skills repo
+#
+# Drop this snippet into the root of your central
+# `mreview-skills` GitLab project to trigger an
+# `mreview review` on every MR. The skills repo is mostly
+# markdown, so the producer stages are different from
+# the Go example (examples/gitlab-ci.yml): no go-build, no
+# govulncheck. Just markdownlint, plus the mreview job
+# itself.
+#
+# Architecture
+# ------------
+#
+#   Stage 1 (lint) runs markdownlint over the .md files
+#   and writes a summary log to .mreview-artifacts/. The
+#   artifact is what the agent sees in the user prompt;
+#   it pre-calibrates confidence on findings that depend
+#   on lint status.
+#
+#   Stage 2 (review) runs mreview. It:
+#     1. Reads the markdownlint summary from the artifacts
+#        directory.
+#     2. Fetches the MR from GitLab.
+#     3. Calls the harness agent, which calls
+#        `mcp__skills__list_skills` and reads the bundled
+#        `skill-authoring` skill (the meta-circular check).
+#        That skill documents every layout / authoring rule
+#        the agent applies to the diff.
+#     4. Posts inline comments on violations + a summary
+#        thread.
+#
+# Why --skills-repo points to the SAME project
+# -------------------------------------------
+#
+#   This is the meta-circular case. The skills the agent
+#   reads to review the diff are the very files in the
+#   diff. The override semantics (central wins over
+#   bundled) mean a team can tighten or replace any
+#   bundled skill by adding a same-named .md here — and
+#   the very next MR is reviewed against the new version.
+#
+# Authentication
+# --------------
+#
+#   The job uses a Personal Access Token via the
+#   GITLAB_TOKEN_CI variable (Project → Settings → CI/CD
+#   → Variables, masked, protected, `api` scope). The
+#   token must have read access to this same project (to
+#   list the repository tree + fetch each .md file).
+#
+# Skill routing — the deferred per-file-type feature
+# ------------------------------------------------
+#
+#   Sub-phase 5 of the codebase review plan (deferred)
+#   adds per-skill glob routing: when the MR's file list
+#   matches a skill's `files:` frontmatter, the skill is
+#   recommended in the user prompt. With that feature,
+#   the bundled `skill-authoring` skill (which would
+#   declare `files: ["**/*.md"]`) is auto-loaded for any
+#   MR touching a .md file — no `list_skills` call needed.
+#   Until then, the agent discovers it via `list_skills`
+#   on its own. Either way, the review shape is the same.
+#
+# Tokensave
+# ---------
+#
+#   Skills are plain text, not source code. The default
+#   `--tokensave-enabled=true` would index this repo
+#   (~ a few dozen .md files) and produce minimal output.
+#   The agent doesn't need a code graph for text review.
+#   Setting `--tokensave-enabled=false` skips the index
+#   and saves ~10-30s. Optional — comment out the flag to
+#   keep tokensave on.
+
+stages:
+  - lint
+  - review
+
+variables:
+  # The single artifacts directory mreview reads from.
+  MREVIEW_ARTIFACTS_DIR: .mreview-artifacts
+
+# ─── Stage 1: markdownlint ─────────────────────────────────
+# Validates the .md skill files (and the project README)
+# for common markdown issues. The summary log goes to
+# .mreview-artifacts/markdownlint.log so mreview can
+# surface it in the user prompt.
+#
+# `|| true` lets the lint stage succeed (exit 0) even
+# when violations are found — the agent surfaces them
+# in the review, not the pipeline status.
+markdownlint:
+  stage: lint
+  image: registry.gitlab.com/gitlab-org/markdownlint-cli2:latest
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_PIPELINE_SOURCE == "web"'
+    - if: '$CI_PIPELINE_SOURCE == "api"'
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+  script:
+    - mkdir -p "$MREVIEW_ARTIFACTS_DIR"
+    - markdownlint-cli2 '**/*.md' --config .markdownlint.json
+      > "$MREVIEW_ARTIFACTS_DIR/markdownlint.log" 2>&1 || true
+  artifacts:
+    when: always
+    paths:
+      - .mreview-artifacts/markdownlint.log
+
+# ─── Stage 2: mreview review ───────────────────────────────
+# The agent uses the bundled `skill-authoring` skill (see
+# internal/skills/bundled/skill-authoring.md) to validate
+# the diff against the skill authoring rules. The skill
+# is always available regardless of --skills-repo config.
+#
+# --skills-repo=$CI_PROJECT_PATH points the loader at this
+# same repo, so team-specific skills (api-design,
+# security-checklist, etc.) are also in the agent's scope.
+# Override semantics: any same-named .md here replaces the
+# bundled version.
+mreview:
+  stage: review
+  image: ghcr.io/inful/mreview:latest-debug
+  variables:
+    GITLAB_TOKEN: ${GITLAB_TOKEN_CI}
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_PIPELINE_SOURCE == "web"'
+    - if: '$CI_PIPELINE_SOURCE == "api"'
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+  needs:
+    - markdownlint
+  script:
+    - mreview review
+        --repo="$CI_PROJECT_PATH"
+        --mr="$CI_MERGE_REQUEST_IID"
+        --gitlab-url="$CI_SERVER_URL"
+        --gitlab-token="$GITLAB_TOKEN_CI"
+        --provider=local
+        --provider-base-url="$LLM_URL"
+        --model="$LLM_MODEL"
+        --workdir="$CI_PROJECT_DIR"
+        --artifacts-dir="$MREVIEW_ARTIFACTS_DIR"
+        --skills-repo="$CI_PROJECT_PATH"
+        --skills-dir=skills
+        --tokensave-enabled=false
+        --log-format=json
+  allow_failure: true   # don't block MRs on review failures; see docs/troubleshooting.md
+  tags:
+    - docker
+
+# Surface the bot's MR URL in the pipeline output so the
+# developer can click through to the review from the
+# pipeline view.
+mreview-summary:
+  stage: review
+  image: alpine:3
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+  script:
+    - echo "Review posted to $CI_MERGE_REQUEST_PROJECT_URL/-/merge_requests/$CI_MERGE_REQUEST_IID"
+  needs:
+    - mreview
