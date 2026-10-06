@@ -74,6 +74,7 @@
 
 stages:
   - lint
+  - ca-bundle
   - review
 
 variables:
@@ -106,6 +107,61 @@ markdownlint:
     paths:
       - .mreview-artifacts/markdownlint.log
 
+# ─── Stage 1.5: custom CA bundle (optional) ─────────────────
+# When the team operates behind a corporate proxy or hosts
+# the GitLab instance / LLM provider on a private CA, the
+# mreview process needs the custom CA bundle to verify TLS.
+# This stage downloads the bundle from a known internal URL
+# and exposes it to the mreview job as a CI artifact.
+#
+# Why a separate stage (not a before_script in the mreview
+# job): the mreview image is distroless (`gcr.io/distroless/cc:*`)
+# and has no curl / wget. We use a separate image that
+# DOES have curl to fetch the bundle, then pass it to the
+# mreview job via the standard CI artifact flow. The mreview
+# job's before_script concatenates the bundle with the
+# system CAs and exports SSL_CERT_FILE (read by Go's
+# crypto/x509 — the standard TLS trust store override).
+#
+# The MREVIEW_CA_BUNDLE_URL variable is set as a masked
+# Project-level CI/CD variable. When unset, this stage
+# writes an empty file and the mreview job's SSL_CERT_FILE
+# points at the system CAs only — the pipeline degrades
+# gracefully to the public-CA-only behaviour.
+ca-bundle-sync:
+  stage: ca-bundle
+  image: curlimages/curl:latest
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_PIPELINE_SOURCE == "web"'
+    - if: '$CI_PIPELINE_SOURCE == "api"'
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+  script:
+    - mkdir -p "$MREVIEW_ARTIFACTS_DIR"
+    - |
+      if [ -n "$MREVIEW_CA_BUNDLE_URL" ]; then
+        echo "Fetching custom CA bundle from $MREVIEW_CA_BUNDLE_URL"
+        # -k on the bootstrap fetch: the bundle URL itself is
+        # served by a server whose cert is signed by the CA
+        # we're about to download. The first fetch can't be
+        # verified against itself; -k is the standard
+        # one-time trust bootstrap.
+        curl -fsSLk --retry 3 "$MREVIEW_CA_BUNDLE_URL" \
+          -o "$MREVIEW_ARTIFACTS_DIR/ca-bundle.pem"
+        head -1 "$MREVIEW_ARTIFACTS_DIR/ca-bundle.pem" \
+          | grep -q 'BEGIN CERTIFICATE' || {
+            echo "ERROR: bundle is not a PEM file"; exit 1
+          }
+        echo "CA bundle: $(wc -c < "$MREVIEW_ARTIFACTS_DIR/ca-bundle.pem") bytes"
+      else
+        echo "MREVIEW_CA_BUNDLE_URL not set; writing empty placeholder"
+        : > "$MREVIEW_ARTIFACTS_DIR/ca-bundle.pem"
+      fi
+  artifacts:
+    when: always
+    paths:
+      - .mreview-artifacts/ca-bundle.pem
+
 # ─── Stage 2: mreview review ───────────────────────────────
 # The agent uses the bundled `skill-authoring` skill (see
 # internal/skills/bundled/skill-authoring.md) to validate
@@ -129,6 +185,15 @@ mreview:
     - if: '$CI_PIPELINE_SOURCE == "schedule"'
   needs:
     - markdownlint
+    - ca-bundle-sync
+  before_script:
+    # Concatenate system CAs (in the mreview image) with the
+    # internal bundle. When MREVIEW_CA_BUNDLE_URL was unset,
+    # the bundle file is empty and cat is a no-op — public
+    # services still verify via the system CAs.
+    - cat /etc/ssl/certs/ca-certificates.crt "$MREVIEW_ARTIFACTS_DIR/ca-bundle.pem" > /tmp/combined.pem
+    - export SSL_CERT_FILE=/tmp/combined.pem
+    - echo "SSL_CERT_FILE=$SSL_CERT_FILE ($(wc -c < $SSL_CERT_FILE) bytes)"
   script:
     - mreview review
         --repo="$CI_PROJECT_PATH"
