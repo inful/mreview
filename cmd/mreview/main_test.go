@@ -74,11 +74,15 @@ func TestRun_ReviewSubcommand_ParsesFlags(t *testing.T) {
 		"--dry-run",
 		"--log-format=json",
 	)
-	// The reviewer emits multiple JSON log lines; parse only the
-	// first one for the field checks.
-	first := firstJSONLine(stderr)
+	// The reviewer emits multiple JSON log lines; scan for the
+	// "starting review" line specifically (it carries the
+	// parsed flag values). The first-line assumption was
+	// always fragile — it broke when a new INFO-level line
+	// (e.g. the per-event-guard skip) appeared earlier in
+	// the log. findJSONLineWith is robust to log reordering.
+	first := findJSONLineWith(stderr, "repo")
 	if first == "" {
-		t.Fatalf("no JSON line in stderr: %s", stderr)
+		t.Fatalf("no JSON log line with 'repo' field in stderr: %s", stderr)
 	}
 	var m map[string]any
 	if err := json.Unmarshal([]byte(first), &m); err != nil {
@@ -102,11 +106,27 @@ func TestRun_ReviewSubcommand_ParsesFlags(t *testing.T) {
 	}
 }
 
-// firstJSONLine returns the first non-empty line of s.
-func firstJSONLine(s string) string {
+// findJSONLineWith returns the first non-empty JSON line of s
+// that parses to an object containing the given key. Returns
+// "" when no such line exists.
+//
+// Used by tests that want to assert on a specific log line
+// rather than the first one. The first-line assumption was
+// always fragile — it silently broke when the logger emitted
+// a new INFO-level line (e.g. the per-event-guard skip) that
+// happened to appear before the line the test cared about.
+// Scanning for a known key is robust to log reordering.
+func findJSONLineWith(s, key string) string {
 	for _, line := range strings.Split(s, "\n") {
 		line = strings.TrimSpace(line)
-		if line != "" {
+		if line == "" {
+			continue
+		}
+		var m map[string]any
+		if err := json.Unmarshal([]byte(line), &m); err != nil {
+			continue
+		}
+		if _, ok := m[key]; ok {
 			return line
 		}
 	}
