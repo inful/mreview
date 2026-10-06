@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/inful/mreview/internal/logging"
+	"github.com/inful/mreview/internal/reviewer"
 )
 
 // runReviewDirect drives runReview() with a minimal ReviewCmd
@@ -119,9 +120,15 @@ func TestRunReview_PerEventGuard_SkipsOnDrafts(t *testing.T) {
 // covers --on-drafts=run: the guard must let the review
 // through and emit the "proceeding with review per
 // override" log line. We don't assert on the downstream
-// outcome (the test GitLab token will fail auth); we only
-// assert the guard did the right thing.
+// outcome; we only assert the guard did the right thing.
+//
+// installFakeReviewer is required here because the test
+// fixture has no CI env (the guard lets it through) and
+// the real orchestrator would try to make a GitLab API
+// call. The fake returns a successful empty result so the
+// test exits cleanly.
 func TestRunReview_PerEventGuard_ProceedsOnDraftsWithOverride(t *testing.T) {
+	installFakeReviewer(t, &fakeReviewer{result: &reviewer.Result{}})
 	_, _, stderr := runReviewDirect(t, map[string]string{
 		"CI_PIPELINE_SOURCE":     "merge_request_event",
 		"CI_MERGE_REQUEST_IID":   "42",
@@ -162,7 +169,13 @@ func TestRunReview_PerEventGuard_SkipsOnPush(t *testing.T) {
 // lets the review through regardless of --on-drafts /
 // --on-push. Asserts the review starts; the downstream auth
 // failure is irrelevant to the guard's behaviour.
+//
+// installFakeReviewer is required here for the same reason
+// as ProceedsOnDraftsWithOverride: the test reaches the
+// orchestrator, which would otherwise make a real network
+// call.
 func TestRunReview_PerEventGuard_LocalInvocationProceeds(t *testing.T) {
+	installFakeReviewer(t, &fakeReviewer{result: &reviewer.Result{}})
 	_, _, stderr := runReviewDirect(t, map[string]string{
 		"CI_PIPELINE_SOURCE": "",
 	}, nil)
@@ -231,7 +244,12 @@ func TestRunReview_EmptyWorkdir_FailsFast(t *testing.T) {
 // without artifacts. The review path is reachable; the
 // test asserts the warning AND that "starting review" still
 // fires.
+//
+// installFakeReviewer is required: without it, runReview
+// would try to build a real orchestrator and make a GitLab
+// network call after the artifact-load path completes.
 func TestRunReview_ArtifactsDir_Missing_Proceeds(t *testing.T) {
+	installFakeReviewer(t, &fakeReviewer{result: &reviewer.Result{}})
 	_, _, stderr := runReviewDirect(t, nil, func(c *ReviewCmd) {
 		c.ArtifactsDir = "/nonexistent/path/to/artifacts"
 	})
@@ -247,7 +265,11 @@ func TestRunReview_ArtifactsDir_Missing_Proceeds(t *testing.T) {
 // happy path: --artifacts-dir points at a directory with
 // stub artifact files. The "artifacts loaded" log line fires
 // with a status label per artifact.
+//
+// installFakeReviewer is required (same reason as the
+// missing-dir test).
 func TestRunReview_ArtifactsDir_Present_LogsLoaded(t *testing.T) {
+	installFakeReviewer(t, &fakeReviewer{result: &reviewer.Result{}})
 	dir := t.TempDir()
 	// Minimal stub artifacts. The loader treats absent /
 	// malformed files as LoadResult with no error at the
