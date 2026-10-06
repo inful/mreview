@@ -15,6 +15,7 @@ import (
 	"github.com/inful/mreview/internal/event"
 	"github.com/inful/mreview/internal/gitlab"
 	"github.com/inful/mreview/internal/policy"
+	"github.com/inful/mreview/internal/reviewer"
 )
 
 // ReviewCmd holds the flags for `mreview review` after the
@@ -208,7 +209,80 @@ func providerAPIKey(name string) string {
 
 // runReview is invoked by run() after CLI parsing matches the
 // "review" subcommand.
+//
+// The function is intentionally thin: it wires four named
+// helpers together (prepare / load / execute / summarize)
+// and translates the per-helper signals into the runReview
+// return contract:
+//
+//   - prepareReview returns (nil, errSkipReview) for the
+//     per-event guard's skip case, which the caller
+//     translates to a nil return (clean exit, no review).
+//   - prepareReview returns (nil, *ExitError) for config
+//     failures (empty workdir, bad policy file).
+//   - executeReview returns (nil, *ExitError) for any
+//     orchestrator / GitLab error, with the kind already
+//     mapped to a typed exit code.
+//   - summarizeReview returns *ExitError only for the
+//     policy-violation case (result.PolicyError == true).
+//
+// The 4-helper split (vs. the original monolithic 170-line
+// function) is the point of sub-phase 4 of the codebase
+// review plan: each helper is small enough to test in
+// isolation, and the public surface (runReview) shrinks
+// to a wiring diagram. See PHASE-fix-review-findings.md
+// for the rationale.
 func runReview(parentCtx context.Context, stdout io.Writer, c *ReviewCmd, cfg *config.File, logger *slog.Logger) error {
+	prep, err := prepareReview(c, logger)
+	if errors.Is(err, errSkipReview) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+
+	rev, err := loadReviewer(parentCtx, c, prep, logger)
+	if err != nil {
+		return err
+	}
+
+	result, err := executeReview(parentCtx, rev, c, logger)
+	if err != nil {
+		return err
+	}
+
+	return summarizeReview(result, stdout, logger)
+}
+
+// preparedReview is the bundle of loaded data that the
+// per-event guard + workdir check + policy + artifact load
+// produces. The struct is unexported because it's only
+// meaningful between prepareReview and loadReviewer; nothing
+// outside the package needs to see it.
+type preparedReview struct {
+	policy      *policy.Policy
+	artifactSet *artifact.Set
+}
+
+// errSkipReview is a sentinel returned by prepareReview
+// when the per-event guard decides to skip. The caller
+// (runReview) translates it to a nil return so the skip
+// path looks like a clean exit to the run() dispatcher.
+//
+// Defined as a package-level var (not a typed error) so
+// errors.Is(err, errSkipReview) is a direct comparison and
+// no type assertion is needed.
+var errSkipReview = errors.New("review skipped per per-event guard")
+
+// prepareReview runs the gates that fire BEFORE the
+// orchestrator is built: per-event guard, workdir check,
+// policy load, artifact load. Returns (nil, errSkipReview)
+// when the guard says to skip; (nil, *ExitError) when a
+// config check fails; (loaded, nil) when the path is
+// clear. The "starting review" log line fires here so it
+// appears at a consistent point in the JSON log stream
+// regardless of which subsequent step fails.
+func prepareReview(c *ReviewCmd, logger *slog.Logger) (*preparedReview, error) {
 	// Per-event guard (issue #41 / #42 migration step 1).
 	ev := event.Detect()
 	decision := event.Decide(ev, event.Prefer(c.OnDrafts), event.Prefer(c.OnPush))
@@ -221,7 +295,7 @@ func runReview(parentCtx context.Context, stdout io.Writer, c *ReviewCmd, cfg *c
 			"on_drafts", c.OnDrafts,
 			"on_push", c.OnPush,
 		)
-		return nil
+		return nil, errSkipReview
 	}
 	if decision.Reason != "" {
 		logger.Info("proceeding with review per override",
@@ -246,7 +320,7 @@ func runReview(parentCtx context.Context, stdout io.Writer, c *ReviewCmd, cfg *c
 			"flag", "--workdir",
 			"env", "MREVIEW_WORKDIR",
 		)
-		return &ExitError{Code: ExitConfig, Reason: msg}
+		return nil, &ExitError{Code: ExitConfig, Reason: msg}
 	}
 
 	// Policy load (issue #42 migration step 2).
@@ -255,7 +329,7 @@ func runReview(parentCtx context.Context, stdout io.Writer, c *ReviewCmd, cfg *c
 		var err error
 		pol, err = policy.Load(c.PolicyFile)
 		if err != nil {
-			return logWithError(logger, ExitConfig, "policy file", err)
+			return nil, logWithError(logger, ExitConfig, "policy file", err)
 		}
 		logger.Info("policy loaded",
 			"path", c.PolicyFile,
@@ -309,6 +383,15 @@ func runReview(parentCtx context.Context, stdout io.Writer, c *ReviewCmd, cfg *c
 		"source", ev.Source,
 	)
 
+	return &preparedReview{policy: pol, artifactSet: artifactSet}, nil
+}
+
+// loadReviewer builds the orchestrator. Thin wrapper over
+// the package-level reviewRunner var (which tests swap for a
+// fake). Returns *ExitError on any build failure; the
+// wrapped error is already informative enough that the
+// caller doesn't need to add context.
+func loadReviewer(parentCtx context.Context, c *ReviewCmd, prep *preparedReview, logger *slog.Logger) (reviewerInterface, error) {
 	rev, err := reviewRunner(parentCtx, clientDeps{
 		GitLabURL:        c.GitLabURL,
 		GitLabToken:      c.GitLabToken,
@@ -317,7 +400,7 @@ func runReview(parentCtx context.Context, stdout io.Writer, c *ReviewCmd, cfg *c
 		ProviderBaseURL:  c.BaseURL,
 		Model:            c.Model,
 		WorkDir:          c.WorkDir,
-		Policy:           pol,
+		Policy:           prep.policy,
 		BotUsername:      c.BotUsername,
 		DryRun:           c.DryRun,
 		DebugLLM:         c.DebugLLM,
@@ -332,13 +415,20 @@ func runReview(parentCtx context.Context, stdout io.Writer, c *ReviewCmd, cfg *c
 		SkillsDir:        c.SkillsDir,
 		SkillsRef:        c.SkillsRef,
 		SkillsTokenEnv:   c.SkillsTokenEnv,
-		Artifacts:        artifactSet,
+		Artifacts:        prep.artifactSet,
 		Logger:           logger,
 	})
 	if err != nil {
-		return logWithError(logger, ExitConfig, err.Error(), err)
+		return nil, logWithError(logger, ExitConfig, err.Error(), err)
 	}
+	return rev, nil
+}
 
+// executeReview runs the orchestrator and maps its error
+// to a typed *ExitError. The gitlab.Error.Kind -> exit
+// code mapping is the only switch in the package; the test
+// in review_errors_test.go pins every case in one place.
+func executeReview(parentCtx context.Context, rev reviewerInterface, c *ReviewCmd, logger *slog.Logger) (*reviewer.Result, error) {
 	result, err := rev.Run(parentCtx, c.Repo, c.MR)
 	if err != nil {
 		// Map gitlab.Error.Kind → typed ExitError.
@@ -346,22 +436,29 @@ func runReview(parentCtx context.Context, stdout io.Writer, c *ReviewCmd, cfg *c
 		if errors.As(err, &ge) {
 			switch ge.Kind {
 			case gitlab.KindAuth:
-				return logWithError(logger, ExitAuth, "auth failure", err)
+				return nil, logWithError(logger, ExitAuth, "auth failure", err)
 			case gitlab.KindNotFound:
-				return logWithError(logger, ExitNotFound, "MR not found", err)
+				return nil, logWithError(logger, ExitNotFound, "MR not found", err)
 			case gitlab.KindConflict:
-				return logWithError(logger, ExitConflict, "conflict", err)
+				return nil, logWithError(logger, ExitConflict, "conflict", err)
 			case gitlab.KindTransient:
-				return logWithError(logger, ExitTransient, "transient exhausted", err)
+				return nil, logWithError(logger, ExitTransient, "transient exhausted", err)
 			case gitlab.KindBadRequest:
-				return logWithError(logger, ExitConfig, "bad request", err)
+				return nil, logWithError(logger, ExitConfig, "bad request", err)
 			default:
-				return logWithError(logger, ExitInternal, "review failed", err)
+				return nil, logWithError(logger, ExitInternal, "review failed", err)
 			}
 		}
-		return logWithError(logger, ExitInternal, "review failed", err)
+		return nil, logWithError(logger, ExitInternal, "review failed", err)
 	}
+	return result, nil
+}
 
+// summarizeReview logs the "review complete" line, prints
+// the MR URL (when present), and converts a PolicyError
+// into the ExitPolicy exit code. Returns nil on a clean
+// review so run() can return 0.
+func summarizeReview(result *reviewer.Result, stdout io.Writer, logger *slog.Logger) error {
 	logger.Info("review complete",
 		"findings", len(result.Findings),
 		"summary_posted", result.Summary != nil,
