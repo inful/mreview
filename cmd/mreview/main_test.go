@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -758,6 +760,173 @@ func TestRun_Review_MaxTurnsFlag(t *testing.T) {
 		)
 		if code == ExitConfig {
 			t.Errorf("--max-turns override rejected; got ExitConfig")
+		}
+	})
+}
+
+// ---------------------------------------------------------------------------
+// Sub-phase 2 additions: pin gaps in run() and applyConfigToEnv coverage
+// ---------------------------------------------------------------------------
+
+// TestApplyConfigToEnv_RestoresPriorValues covers the
+// cleanup path of applyConfigToEnv: when the function sets
+// an env var that was already set, the returned cleanup
+// function must restore the PRIOR value, not just unset it.
+// Without this, a test (or a chained run) that set
+// GITLAB_URL=foo would see it disappear after the cleanup
+// runs.
+//
+// The existing TestApplyConfigToEnv_ExhaustiveBindings
+// exercises the set side; this test pins the restore side.
+func TestApplyConfigToEnv_RestoresPriorValues(t *testing.T) {
+	t.Setenv("GITLAB_URL", "https://prior.example.com")
+
+	cfg := &config.File{
+		GitLab: config.GitLabConfig{
+			URL: "https://new.example.com",
+		},
+	}
+	cleanup := applyConfigToEnv(cfg)
+
+	if got := os.Getenv("GITLAB_URL"); got != "https://new.example.com" {
+		t.Errorf("GITLAB_URL during apply = %q, want new", got)
+	}
+
+	cleanup()
+
+	if got := os.Getenv("GITLAB_URL"); got != "https://prior.example.com" {
+		t.Errorf("GITLAB_URL after cleanup = %q, want prior restored", got)
+	}
+}
+
+// TestApplyConfigToEnv_RestoresUnsetValues covers the
+// opposite branch: when the function sets an env var that
+// was NOT set beforehand, the cleanup must unset it (not
+// leave a stale value). The function uses LookupEnv to
+// distinguish "unset" from "set to empty", and a refactor
+// that loses that distinction would leave a stray empty
+// value behind.
+func TestApplyConfigToEnv_RestoresUnsetValues(t *testing.T) {
+	// Make sure the var is unset before the test runs.
+	// t.Setenv + os.Unsetenv via the helper below ensures
+	// the test's own state, not the parent's.
+	before, hadBefore := os.LookupEnv("GITLAB_URL")
+	if hadBefore {
+		t.Cleanup(func() { _ = os.Setenv("GITLAB_URL", before) })
+	}
+	_ = os.Unsetenv("GITLAB_URL")
+
+	cfg := &config.File{
+		GitLab: config.GitLabConfig{
+			URL: "https://new.example.com",
+		},
+	}
+	cleanup := applyConfigToEnv(cfg)
+
+	if got := os.Getenv("GITLAB_URL"); got != "https://new.example.com" {
+		t.Errorf("GITLAB_URL during apply = %q, want new", got)
+	}
+
+	cleanup()
+
+	// After cleanup, the var should be back to its prior
+	// state (unset).
+	if _, isSet := os.LookupEnv("GITLAB_URL"); isSet {
+		t.Errorf("GITLAB_URL should be unset after cleanup (was unset before apply)")
+	}
+}
+
+// TestRun_InvalidFlag_ExitsConfig covers the kong parser
+// error path: an unknown flag produces a *kong.ParseError
+// from kong.New(...).Parse(...), which run() catches and
+// returns ExitConfig. The test pins that the error makes
+// it to stderr (so the operator sees which flag was wrong)
+// and that the exit code is the config-error code.
+func TestRun_InvalidFlag_ExitsConfig(t *testing.T) {
+	_, stderr, code := runWithArgs(t, "review", "--this-flag-does-not-exist=true")
+	if code != ExitConfig {
+		t.Errorf("unknown flag returned %d, want %d (ExitConfig)\nstderr: %s",
+			code, ExitConfig, stderr)
+	}
+	// kong's error message includes the unknown flag name.
+	if !strings.Contains(stderr, "--this-flag-does-not-exist") {
+		t.Errorf("expected the unknown flag name in stderr, got: %q", stderr)
+	}
+}
+
+// TestRun_UnknownSubcommand_ExitsConfig covers the dispatch
+// path: a subcommand name that kong doesn't recognise
+// (e.g. "frobnicate") is caught at parse time by kong
+// itself — it returns "unexpected argument frobnicate",
+// which run() turns into ExitConfig. The default branch
+// in run()'s switch is a backstop for an edge case kong
+// doesn't cover (e.g. a future subcommand added to the
+// CLI struct but not to the switch); the test pins the
+// observable behaviour (exit code + readable error).
+func TestRun_UnknownSubcommand_ExitsConfig(t *testing.T) {
+	_, stderr, code := runWithArgs(t, "frobnicate")
+	if code != ExitConfig {
+		t.Errorf("unknown subcommand returned %d, want %d (ExitConfig)\nstderr: %s",
+			code, ExitConfig, stderr)
+	}
+	// Kong prints 'unexpected argument <name>'.
+	if !strings.Contains(stderr, "frobnicate") {
+		t.Errorf("expected 'frobnicate' in stderr, got: %q", stderr)
+	}
+}
+
+// TestRun_DoctorSubcommand_ReachesDoctor covers the
+// operator-facing contract that `mreview doctor` is
+// reachable. The existing TestRun_DoctorSubcommand_*
+// tests drive the doctor path end-to-end (with various
+// skip-* flags); this test just confirms the subcommand
+// itself shows up in --help and `--help` exits 0.
+func TestRun_DoctorSubcommand_ReachesDoctor(t *testing.T) {
+	stdout, _, code := runWithArgs(t, "doctor", "--help")
+	if code != ExitOK {
+		t.Errorf("doctor --help returned %d, want 0", code)
+	}
+	// Discoverability contract: the help output should
+	// mention the operator's primary flags.
+	for _, want := range []string{"--skip-gitlab", "--skip-provider", "--provider"} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("doctor --help missing %q\n%s", want, stdout)
+		}
+	}
+}
+
+// TestExitCodeFromError covers the pure mapping function
+// that converts a Go error to a process exit code. The
+// function is the single point of translation between the
+// error types runReview / runDoctor produce and the exit
+// codes documented in the README. A regression here would
+// silently change process behaviour for every CLI failure.
+func TestExitCodeFromError(t *testing.T) {
+	t.Run("nil -> ExitOK", func(t *testing.T) {
+		if got := exitCodeFromError(nil); got != ExitOK {
+			t.Errorf("exitCodeFromError(nil) = %d, want %d (ExitOK)", got, ExitOK)
+		}
+	})
+	t.Run("*ExitError with Code X -> X", func(t *testing.T) {
+		e := &ExitError{Code: ExitAuth, Reason: "token rejected"}
+		if got := exitCodeFromError(e); got != ExitAuth {
+			t.Errorf("exitCodeFromError(*ExitError{Auth}) = %d, want %d", got, ExitAuth)
+		}
+	})
+	t.Run("generic error -> ExitInternal", func(t *testing.T) {
+		err := errors.New("boom")
+		if got := exitCodeFromError(err); got != ExitInternal {
+			t.Errorf("exitCodeFromError(generic) = %d, want %d (ExitInternal)", got, ExitInternal)
+		}
+	})
+	t.Run("wrapped *ExitError still returns its Code (errors.As)", func(t *testing.T) {
+		// fmt.Errorf("...: %w", exitErr) is a common pattern.
+		// exitCodeFromError uses errors.As, so the wrapped
+		// error must still resolve to the inner Code.
+		inner := &ExitError{Code: ExitPolicy, Reason: "policy violation"}
+		wrapped := fmt.Errorf("orchestrator: %w", inner)
+		if got := exitCodeFromError(wrapped); got != ExitPolicy {
+			t.Errorf("exitCodeFromError(wrapped ExitError) = %d, want %d", got, ExitPolicy)
 		}
 	})
 }
