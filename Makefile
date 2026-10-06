@@ -5,7 +5,7 @@
 # so contributors can run `make test`, `make lint`, etc. without
 # remembering the exact flags.
 
-.PHONY: build test test-race test-license lint tidy vet fmt run verify-license clean help
+.PHONY: build test test-race test-license test-commit-msg lint tidy vet fmt run verify-license clean help
 
 BINARY := dist/mreview
 PKG    := ./cmd/mreview
@@ -24,6 +24,9 @@ test-race: ## Alias for test.
 
 test-license: ## Run the verify-license shell test.
 	./scripts/verify-license_test.sh
+
+test-commit-msg: ## Run the check-commit-msg shell test.
+	./scripts/check-commit-msg_test.sh
 
 verify-license: ## Byte-diff LICENSE against the canonical AGPL-3.0 copy.
 	./scripts/verify-license.sh
