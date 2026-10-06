@@ -88,7 +88,7 @@ func TestParseMarkerLine_NoMarker(t *testing.T) {
 	bodies := []string{
 		"",
 		"just a regular comment",
-		"# mreview summary\n\nFindings...",  // missing marker
+		"# mreview summary\n\nFindings...", // missing marker
 		"<!-- not a marker -->",
 	}
 	for _, body := range bodies {

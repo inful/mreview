@@ -53,12 +53,12 @@ var errBranchUnknown = errors.New("git: could not determine current branch")
 //
 // Error return values:
 //   - ErrNoGit:    `git` is not on PATH (the distroless CI
-//                  image; the caller should debug-log and
-//                  move on — see package doc).
+//     image; the caller should debug-log and
+//     move on — see package doc).
 //   - ErrNotARepo: workdir is not a git repo; not an error
-//                  in the reviewer's view.
+//     in the reviewer's view.
 //   - errBranchUnknown (wrapped): any other failure (e.g.
-//                  detached HEAD, shallow clone, timeout).
+//     detached HEAD, shallow clone, timeout).
 //
 // The command has a 2-second ceiling. Reading a branch is
 // microseconds of work in a normal repo; a slow git here is
@@ -99,7 +99,7 @@ func CurrentBranch(workdir string) (string, error) {
 				return "", ErrNotARepo
 			}
 		}
-		return "", fmt.Errorf("%w: %v", errBranchUnknown, err)
+		return "", errors.Join(errBranchUnknown, err)
 	}
 	branch := strings.TrimSpace(string(out))
 	if branch == "" || branch == "HEAD" {

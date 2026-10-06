@@ -217,7 +217,7 @@ func TestRenderSummary_MarkerPrepended(t *testing.T) {
 	// content stays at top.
 	markerIdx := strings.Index(out, want)
 	bodyIdx := strings.Index(out, "# mreview summary")
-	if !(markerIdx >= 0 && bodyIdx > markerIdx) {
+	if markerIdx < 0 || bodyIdx <= markerIdx {
 		t.Errorf("ordering wrong: marker=%d body=%d\n%s", markerIdx, bodyIdx, out)
 	}
 }
@@ -286,7 +286,7 @@ func TestRenderSummary_DetailsWrapping(t *testing.T) {
 	summaryIdx := strings.Index(out, "<summary>Findings (3)</summary>")
 	tableIdx := strings.Index(out, "| Severity | File | Line | Category | Description |")
 	closeIdx := strings.Index(out, "</details>")
-	if !(openIdx < summaryIdx && summaryIdx < tableIdx && tableIdx < closeIdx) {
+	if openIdx >= summaryIdx || summaryIdx >= tableIdx || tableIdx >= closeIdx {
 		t.Errorf("ordering wrong: <details>=%d <summary>=%d <table>=%d </details>=%d\n%s",
 			openIdx, summaryIdx, tableIdx, closeIdx, out)
 	}

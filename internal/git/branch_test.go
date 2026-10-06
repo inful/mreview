@@ -125,9 +125,9 @@ func TestCurrentBranch_NoGitInPath(t *testing.T) {
 	t.Setenv("PATH", "")
 	defer func() {
 		if hadPath {
-			os.Setenv("PATH", origPath)
+			_ = os.Setenv("PATH", origPath)
 		} else {
-			os.Unsetenv("PATH")
+			_ = os.Unsetenv("PATH")
 		}
 	}()
 
