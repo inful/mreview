@@ -5,7 +5,7 @@
 # so contributors can run `make test`, `make lint`, etc. without
 # remembering the exact flags.
 
-.PHONY: build test test-race lint tidy vet fmt run clean help
+.PHONY: build test test-race test-license lint tidy vet fmt run verify-license clean help
 
 BINARY := dist/mreview
 PKG    := ./cmd/mreview
@@ -21,6 +21,12 @@ test: ## Run unit tests (race-enabled, no cache).
 
 test-race: ## Alias for test.
 	go test -race -count=1 ./...
+
+test-license: ## Run the verify-license shell test.
+	./scripts/verify-license_test.sh
+
+verify-license: ## Byte-diff LICENSE against the canonical AGPL-3.0 copy.
+	./scripts/verify-license.sh
 
 lint: ## Run golangci-lint with the project's config.
 	golangci-lint run
