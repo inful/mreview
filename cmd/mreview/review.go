@@ -287,7 +287,14 @@ func prepareReview(c *ReviewCmd, logger *slog.Logger) (*preparedReview, error) {
 	ev := event.Detect()
 	decision := event.Decide(ev, event.Prefer(c.OnDrafts), event.Prefer(c.OnPush))
 	if !decision.Proceed {
-		logger.Debug("skipping review per per-event guard",
+		// Info (not Debug) so the operator sees the skip in
+		// default log output. A silent skip in CI is a real
+		// UX problem: the pipeline reports "success" but the
+		// review never ran, and the operator has no breadcrumb
+		// to find out why. Verbose mode still emits this line
+		// (and everything else); suppressing it under the
+		// default INFO level was over-eager.
+		logger.Info("skipping review per per-event guard",
 			"reason", decision.Reason,
 			"source", ev.Source,
 			"mr_iid", ev.MRIID,
@@ -358,7 +365,13 @@ func prepareReview(c *ReviewCmd, logger *slog.Logger) (*preparedReview, error) {
 			VulnsPath: "vulns.json",
 		})
 		if err != nil {
-			logger.Debug("artifacts dir not available; proceeding without",
+			// Info (not Debug) for the same reason as the
+			// per-event guard: a missing artifacts dir is
+			// degraded information, not a diagnostic detail.
+			// The operator should see this in the default
+			// log output so they can correct the CI path
+			// (typo, missing job) without enabling verbose.
+			logger.Info("artifacts dir not available; proceeding without",
 				"dir", c.ArtifactsDir,
 				"err", err.Error(),
 			)

@@ -254,7 +254,7 @@ func TestRunReview_ArtifactsDir_Missing_Proceeds(t *testing.T) {
 		c.ArtifactsDir = "/nonexistent/path/to/artifacts"
 	})
 	if !strings.Contains(stderr, "artifacts dir not available") {
-		t.Errorf("expected 'artifacts dir not available' debug line, got: %s", stderr)
+		t.Errorf("expected 'artifacts dir not available' log line, got: %s", stderr)
 	}
 	if !strings.Contains(stderr, "starting review") {
 		t.Errorf("missing artifacts dir should not block the review; got: %s", stderr)
