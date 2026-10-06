@@ -43,6 +43,15 @@ jobs:
       - name: Run go vet
         run: go vet ./...
 
+      - name: Verify LICENSE matches canonical AGPL-3.0
+        # The AGPL-3.0 license text is the project's legal contract;
+        # "changing it is not allowed" per its own header. This gate
+        # byte-diffs LICENSE against scripts/AGPL-3.0-canonical.txt
+        # so accidental edits (a codebase review caught word
+        # substitutions and a paragraph swap) fail the build.
+        # See .planning/PHASE-fix-review-findings.md, sub-phase 0.
+        run: ./scripts/verify-license.sh
+
       - name: Run golangci-lint
         # v7 is required for golangci-lint v2.x configs (v6 only
         # supports v1.x formats).
