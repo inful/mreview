@@ -309,7 +309,7 @@ func runReview(parentCtx context.Context, stdout io.Writer, c *ReviewCmd, cfg *c
 		"source", ev.Source,
 	)
 
-	rev, err := buildReviewer(parentCtx, clientDeps{
+	rev, err := reviewRunner(parentCtx, clientDeps{
 		GitLabURL:        c.GitLabURL,
 		GitLabToken:      c.GitLabToken,
 		ProviderName:     c.Provider,

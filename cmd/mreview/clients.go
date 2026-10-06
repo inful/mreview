@@ -113,6 +113,32 @@ type clientDeps struct {
 	Logger *slog.Logger
 }
 
+// reviewerInterface is the surface of *reviewer.Orchestrator
+// that runReview depends on. The production orchestrator
+// (built by buildReviewer) satisfies it implicitly; tests
+// substitute a fake that returns canned reviewer.Result
+// values without spinning up a harness runtime or hitting
+// GitLab.
+//
+// Defined in cmd/mreview/ (not internal/reviewer/) so the
+// test-injection surface stays with the package that uses it
+// and the abstraction doesn't leak to downstream packages.
+type reviewerInterface interface {
+	Run(ctx context.Context, project string, iid int, action ...string) (*reviewer.Result, error)
+}
+
+// reviewRunner is the function runReview uses to build the
+// orchestrator. Production wires buildReviewer; tests swap in
+// a fake to exercise runReview's branches without the
+// harness runtime + GitLab client wiring.
+//
+// Package-level (not a parameter) because runReview's
+// signature is driven by kong's subcommand dispatch and adding
+// a parameter would propagate to every caller. The variable
+// is named so a test file can override it under a t.Cleanup
+// and restore the original on teardown.
+var reviewRunner = buildReviewer
+
 // buildReviewer wires up everything the ReviewMR call needs:
 // a *gitlab.Client, a harness runtime (built with read-only
 // tools), the provider from the harness matrix, the optional
@@ -122,7 +148,12 @@ type clientDeps struct {
 // because building a runtime is expensive (tool registry +
 // provider + session) and the orchestrator should be cheap to
 // construct for tests.
-func buildReviewer(ctx context.Context, deps clientDeps) (*reviewer.Orchestrator, error) {
+//
+// Returns the reviewerInterface (not the concrete
+// *reviewer.Orchestrator) so call sites depend on the narrow
+// surface, and so the package-level reviewRunner var (above)
+// can be swapped to a fake by tests.
+func buildReviewer(ctx context.Context, deps clientDeps) (reviewerInterface, error) {
 	glClient, err := gitlab.NewClient(deps.GitLabURL, deps.GitLabToken, gitlab.RetryConfig{
 		MaxAttempts:    deps.Retries + 1,
 		InitialBackoff: deps.RetryBackoff,
