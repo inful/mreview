@@ -30,9 +30,23 @@ type Client struct {
 
 // NewClient builds a Client pointed at baseURL with the given token.
 //
-// baseURL must be the API root (e.g. "https://gitlab.com/api/v4" or
-// "https://gitlab.example.com/api/v4"). The official client appends
-// "/projects/:pid/merge_requests/:iid" etc. to it automatically.
+// baseURL may be either:
+//   - the GitLab API root (e.g. "https://gitlab.com/api/v4"), the
+//     shape the official client-go SDK expects, OR
+//   - the GitLab web UI base URL (e.g. "https://gitlab.com" or
+//     "$CI_SERVER_URL" from a CI pipeline). When the URL does
+//     not already end with "/api/v4", NewClient appends it
+//     automatically. This is the form the GitLab docs
+//     recommend passing for CI integrations (the
+//     predefined variable is $CI_SERVER_URL) and the form
+//     that catches operators who don't realise the SDK
+//     doesn't add the API path itself.
+//
+// The auto-prepend is idempotent: a URL that already ends with
+// "/api/v4" is passed through unchanged. A trailing slash is
+// tolerated ("https://gitlab.com/" → "https://gitlab.com/api/v4").
+// When the auto-prepend fires, a debug line is logged so the
+// operator can see what was used.
 //
 // token is a Personal Access Token with `api` scope. The token is
 // sent as PRIVATE-TOKEN (the GitLab default for PATs); OAuth tokens
@@ -49,8 +63,25 @@ func NewClient(baseURL, token string, retry RetryConfig, logger *slog.Logger) (*
 	if logger == nil {
 		logger = slog.Default()
 	}
+
+	// Auto-prepend "/api/v4" when the operator passed the
+	// web-UI base URL instead of the API root. This makes
+	// the GitLab-CI pattern (--gitlab-url=$CI_SERVER_URL) work
+	// out of the box; the SDK doesn't do this itself, and
+	// without it the request URL becomes
+	// "<base>/projects/.../merge_requests/..." which GitLab
+	// returns 404 for (it expects "<base>/api/v4/...").
+	apiURL := strings.TrimRight(baseURL, "/")
+	if !strings.HasSuffix(apiURL, "/api/v4") {
+		apiURL += "/api/v4"
+		logger.Debug("gitlab: auto-prepended /api/v4 to baseURL",
+			"input", baseURL,
+			"normalized", apiURL,
+		)
+	}
+
 	inner, err := gl.NewClient(token,
-		gl.WithBaseURL(baseURL),
+		gl.WithBaseURL(apiURL),
 		gl.WithoutRetries(), // we own the retry policy via doWithRetry
 	)
 	if err != nil {
@@ -58,7 +89,7 @@ func NewClient(baseURL, token string, retry RetryConfig, logger *slog.Logger) (*
 	}
 	return &Client{
 		inner:   inner,
-		baseURL: baseURL,
+		baseURL: apiURL,
 		retry:   retry,
 		logger:  logger,
 	}, nil
