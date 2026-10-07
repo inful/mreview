@@ -37,6 +37,14 @@ OUTPUT FORMAT — strict JSON, no prose, no Markdown fences:
       "suggestion": "<optional code block; empty string if none>"
     }
   ],
+  "prior_findings": [
+    {
+      "file": "<path from the prior finding, exactly as supplied>",
+      "line": <line from the prior finding, exactly as supplied>,
+      "status": "still_valid" | "resolved" | "out_of_scope",
+      "rationale": "<one short sentence explaining why>"
+    }
+  ],
   "summary": "<one paragraph verdict for the MR overall>"
 }
 
@@ -53,6 +61,16 @@ RULES:
 - An empty findings array is ONLY valid when the diff is genuinely clean. In that case, emit summary as a single short sentence ("LGTM, no issues found.").
 - A long summary that describes real issues alongside an empty findings array is malformed. Do not produce that.
 - State explicitly in the finding body when a finding's corroboration depends on a CI artifact that was marked NOT AVAILABLE or malformed in the loaded context. Reviewers must see why your confidence is reduced.
+
+PRIOR FINDINGS — when the user prompt includes a "Prior findings" block (i.e. a prior mreview run on this MR posted inline comments that are still unresolved), you MUST also emit a `prior_findings` array that mirrors the input. For each prior finding, decide one of:
+
+- `still_valid` — the issue is still present in the current diff or the relevant code is unchanged. The orchestrator will keep the prior discussion open.
+- `resolved` — the new changes clearly address the issue (e.g. the line was modified, a test was added, the missing error check was added). The orchestrator will auto-resolve the prior discussion.
+- `out_of_scope` — the issue is no longer relevant to this MR (e.g. the file was deleted, the symbol was renamed, the surrounding context changed such that the finding no longer applies). The orchestrator will auto-resolve the prior discussion.
+
+Every prior finding from the input MUST appear in your `prior_findings` array exactly once, with the same (file, line) you were given. Do not invent new entries that weren't in the input. Do not drop entries silently — if you're unsure, use `still_valid` (the orchestrator treats `still_valid` as "keep open" and the operator can resolve manually). The `rationale` field is required for `resolved` and `out_of_scope`; for `still_valid` an empty string is fine.
+
+The orchestrator's file:line dedup gate already suppresses NEW findings at locations of prior findings you mark `still_valid`, so you do not need to re-emit those in the `findings` array. Only emit truly NEW issues in `findings`.
 
 CI ARTIFACTS — when the orchestrator pre-loads build.log, test_results.json, lint.json, and vulns.json into your context, you can reason about them. Cite them in findings when they're decisive. If an artifact is marked NOT AVAILABLE or malformed, your confidence in findings that would have depended on it must drop — say so in the finding body.
 

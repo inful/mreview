@@ -17,6 +17,7 @@ package prompts
 
 import (
 	_ "embed"
+	"fmt"
 	"strings"
 
 	"github.com/inful/mreview/internal/ci/artifact"
@@ -47,10 +48,31 @@ func ReviewSystemPrompt() string {
 	return reviewSystemMarkdown
 }
 
+// PriorFinding is the shape of a single prior mreview
+// inline comment that the orchestrator passes to the
+// agent. The agent is asked to mirror this in its
+// `prior_findings` output with a status field, so the
+// orchestrator can decide which prior discussions to
+// keep open vs. auto-resolve.
+//
+// Decoupled from internal/gitlab (the orchestrator's
+// package) so the prompts package doesn't import GitLab
+// plumbing. The orchestrator builds PriorFinding values
+// from the existing GitLab discussion data and passes
+// them in.
+type PriorFinding struct {
+	File       string
+	Line       int
+	Severity   string
+	Category   string
+	Body       string
+	Suggestion string
+}
+
 // ReviewUserPrompt builds the user message from the MR
-// metadata + diff chunks + CI artifacts. The function is a
-// pure renderer — no I/O, no logging — so tests can assert
-// exact strings.
+// metadata + diff chunks + CI artifacts + prior findings.
+// The function is a pure renderer — no I/O, no logging —
+// so tests can assert exact strings.
 //
 // The chunks argument is the output of diff.ChunkByFile. The
 // orchestrator passes the MR's diff there; this function turns
@@ -62,7 +84,17 @@ func ReviewSystemPrompt() string {
 // renders the "all NOT AVAILABLE" block (see
 // RenderArtifactBlock) so the agent sees an explicit
 // "artifacts are absent" signal rather than an omission.
-func ReviewUserPrompt(meta ReviewMetadata, chunks []diff.Chunk, artifactSet artifact.Set) string {
+//
+// The priorFindings argument is the list of inline
+// comments a previous mreview run left on the MR. When
+// non-empty, the agent is asked to mirror them in its
+// `prior_findings` response with a status field. When
+// empty (no prior run, or the prior run posted no inline
+// findings), the "Prior findings" block is omitted from
+// the prompt — the agent is told to skip the
+// `prior_findings` array. This avoids confusing the model
+// with an empty block on a clean first run.
+func ReviewUserPrompt(meta ReviewMetadata, chunks []diff.Chunk, artifactSet artifact.Set, priorFindings []PriorFinding) string {
 	var b strings.Builder
 	b.WriteString("Merge request: !")
 	b.WriteString(itoa(meta.IID))
@@ -82,6 +114,27 @@ func ReviewUserPrompt(meta ReviewMetadata, chunks []diff.Chunk, artifactSet arti
 		b.WriteString("Description:\n")
 		b.WriteString(strings.TrimSpace(meta.Description))
 		b.WriteString("\n\n")
+	}
+
+	// Prior findings block goes BEFORE the artifact block
+	// (and before the diff) so the agent reads it first
+	// and has the prior context in mind when evaluating
+	// the new diff. The block is omitted entirely when
+	// the orchestrator passes an empty slice — a first
+	// run with no prior findings doesn't need a "0 prior
+	// findings" marker.
+	if len(priorFindings) > 0 {
+		b.WriteString("Prior findings (from a previous mreview run on this MR):\n\n")
+		for i, pf := range priorFindings {
+			// Index so the agent can refer to a specific
+			// prior finding in its rationale ("#2: ...")
+			// without restating the file:line.
+			fmt.Fprintf(&b, "%d. `%s:%d` [%s] %s\n", i+1, pf.File, pf.Line, pf.Severity, strings.TrimSpace(pf.Body))
+			if pf.Suggestion != "" {
+				fmt.Fprintf(&b, "   suggestion: %s\n", strings.TrimSpace(pf.Suggestion))
+			}
+		}
+		b.WriteString("\nFor each prior finding above, decide whether the new diff below addresses it. Emit a `prior_findings` array in your JSON response that mirrors this list, with a `status` of `still_valid`, `resolved`, or `out_of_scope` for each. Do not re-emit prior findings in the `findings` array — only emit truly NEW issues there.\n\n")
 	}
 
 	// CI artifact block goes BEFORE the diff so the agent

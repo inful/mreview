@@ -3,6 +3,8 @@ package prompts
 import (
 	"strings"
 	"testing"
+
+	"github.com/inful/mreview/internal/ci/artifact"
 )
 
 // TestReviewSystemPrompt_CoreContract pins the
@@ -78,6 +80,18 @@ func TestReviewSystemPrompt_CoreContract(t *testing.T) {
 		"\"body\"",
 		"\"suggestion\"",
 		"\"summary\"",
+		// Prior-findings block: the LLM is asked to mirror
+		// the input prior findings and tag each with a
+		// status (still_valid / resolved / out_of_scope).
+		// Without these fields, the orchestrator can't
+		// auto-resolve prior discussions, which is the
+		// whole point of running on a new commit.
+		"\"prior_findings\"",
+		"\"status\"",
+		"\"rationale\"",
+		"\"still_valid\"",
+		"\"resolved\"",
+		"\"out_of_scope\"",
 	}
 	for _, field := range requiredFields {
 		if !strings.Contains(p, field) {
@@ -164,6 +178,49 @@ func TestReviewSystemPrompt_NoToolSprawl(t *testing.T) {
 		if strings.Contains(p, "tool: "+forbidden) ||
 			strings.Contains(p, "- "+forbidden+":") {
 			t.Errorf("system prompt appears to register forbidden tool %q", forbidden)
+		}
+	}
+}
+
+// TestReviewUserPrompt_NoPriorFindings covers the "first
+// run" path: no prior findings, so the prompt omits the
+// "Prior findings" block. This is the common case on a
+// fresh MR and the agent should see a clean prompt that
+// doesn't mention the prior_findings array at all in the
+// user message (it's still defined in the system prompt
+// schema).
+func TestReviewUserPrompt_NoPriorFindings(t *testing.T) {
+	meta := ReviewMetadata{IID: 42, Title: "Test"}
+	p := ReviewUserPrompt(meta, nil, artifact.Set{}, nil)
+	if strings.Contains(p, "Prior findings") {
+		t.Errorf("prompt should NOT contain a 'Prior findings' block when priorFindings is empty; got:\n%s", p)
+	}
+}
+
+// TestReviewUserPrompt_WithPriorFindings covers the "follow-
+// up run" path: a prior mreview run left inline comments,
+// so the prompt includes a numbered "Prior findings" block
+// that the agent is asked to mirror in its prior_findings
+// response.
+func TestReviewUserPrompt_WithPriorFindings(t *testing.T) {
+	meta := ReviewMetadata{IID: 42, Title: "Test"}
+	prior := []PriorFinding{
+		{File: "a.go", Line: 10, Severity: "warning", Body: "Missing test"},
+		{File: "b.go", Line: 20, Severity: "error", Body: "Bad name", Suggestion: "rename to `foo`"},
+	}
+	p := ReviewUserPrompt(meta, nil, artifact.Set{}, prior)
+	for _, want := range []string{
+		"Prior findings",
+		"1. `a.go:10` [warning] Missing test",
+		"2. `b.go:20` [error] Bad name",
+		"suggestion: rename to `foo`",
+		"prior_findings", // the schema field the agent must emit
+		"still_valid",
+		"resolved",
+		"out_of_scope",
+	} {
+		if !strings.Contains(p, want) {
+			t.Errorf("prompt missing %q", want)
 		}
 	}
 }
