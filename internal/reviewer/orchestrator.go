@@ -74,10 +74,13 @@ type Finding struct {
 }
 
 // ReviewResponse is the JSON envelope the agent emits. Same
-// shape the old internal/llm package used.
+// shape the old internal/llm package used, extended with a
+// PriorFindings array for the "is each prior finding still
+// valid?" judgement (see PriorFindingStatus).
 type ReviewResponse struct {
-	Findings []Finding `json:"findings"`
-	Summary  string    `json:"summary"`
+	Findings      []Finding            `json:"findings"`
+	PriorFindings []PriorFindingStatus `json:"prior_findings"`
+	Summary       string               `json:"summary"`
 }
 
 // Runner is what the orchestrator depends on for the LLM
@@ -93,7 +96,7 @@ type Runner interface {
 
 // Config is the orchestrator's constructor input.
 type Config struct {
-	GitLab      *gitlab.Client
+	GitLab      gitlabClient
 	Runner      Runner
 	WorkDir     string // repository root the harness runs against
 	Policy      *policy.Policy
@@ -202,11 +205,18 @@ type PostedFinding struct {
 // (open / reopen / update / close / merge) — passed only when
 // the orchestrator runs from a webhook context. Empty means
 // "called from the CLI directly" and behaves like `open`.
+//
+// The action is currently not branched on — the orchestrator
+// always processes the MR the same way regardless of
+// event type. Earlier code skipped the summary post on
+// "update" (push) events; that skip was removed when the
+// "edit existing summary in place" behaviour landed
+// (the PUT-based edit doesn't bump the activity feed the
+// way POST did, so the spam concern went away). The
+// `action` parameter is kept on the signature for future
+// event-aware behaviour and to preserve the public API.
 func (o *Orchestrator) Run(ctx context.Context, project any, iid int, action ...string) (*Result, error) {
-	act := ""
-	if len(action) > 0 {
-		act = action[0]
-	}
+	_ = action // intentionally ignored today; see comment above
 
 	logger := o.logger.With("run", "review", "project", project, "mr_iid", iid)
 
@@ -223,22 +233,48 @@ func (o *Orchestrator) Run(ctx context.Context, project any, iid int, action ...
 	// re-running would burn tokens for no new information.
 	//
 	// If we find one with a DIFFERENT SHA, the source branch
-	// has new commits since the prior run. Resolve the prior
-	// summary + every prior inline-finding discussion so they
-	// collapse in the GitLab UI; then proceed with the new
-	// run, which will post a fresh summary and fresh findings
-	// that visually supersede the prior.
+	// has new commits since the prior run. We extract the
+	// prior findings and pass them to the LLM as context;
+	// the LLM is asked to mirror them in its `prior_findings`
+	// response with a status (still_valid / resolved /
+	// out_of_scope), which the orchestrator uses to decide
+	// which prior discussions to keep open vs. auto-resolve.
+	// The summary is EDITED in place (not posted fresh) so
+	// the activity feed shows one mreview note per MR that
+	// evolves over time, not a pile of stale summaries.
 	//
 	// Skipped by --no-dedup (operator override: force a fresh
 	// run regardless, e.g. after a prompt change or when the
 	// prior review was wrong and a re-roll is desired).
+	//
+	// The `prior` variable is also reused below as the
+	// "summary to edit" target when a prior exists; we
+	// capture it here so the summary-edit path at the
+	// bottom of Run doesn't need a second ListDiscussions
+	// call.
+	//
+	// We fetch discussions ONCE up front and pass the list
+	// to both findPriorSummary (commit-level dedup) and
+	// later to findPriorFindingLocations (file:line dedup
+	// of new findings vs. prior) — three consumers, one
+	// network call.
+	var discs []gitlab.Discussion
+	var prior *PriorReview
+	var priorFindings []PriorFinding
 	if !o.cfg.NoDedup && mr.SHA != "" {
-		prior, perr := o.findPriorSummary(ctx, project, iid, logger)
-		if perr != nil {
+		var derr error
+		discs, derr = o.cfg.GitLab.ListDiscussions(ctx, project, iid)
+		if derr != nil {
 			logger.Debug("dedup pre-check failed; proceeding with fresh review",
-				"err", perr.Error(),
+				"err", derr.Error(),
 			)
-		} else if prior != nil {
+		} else {
+			prior = FindPriorMReviewSummary(discs)
+			logger.Debug("dedup: scanned existing discussions",
+				"project", project, "iid", iid, "discussions", len(discs),
+			)
+		}
+		if prior != nil {
 			if prior.Commit == mr.SHA {
 				logger.Info("review skipped: already reviewed this commit",
 					"commit", mr.SHA,
@@ -250,25 +286,25 @@ func (o *Orchestrator) Run(ctx context.Context, project any, iid int, action ...
 					SkippedReason: "already reviewed this commit",
 				}, nil
 			}
-			// Different commit → run a fresh review. We
-			// intentionally do NOT auto-resolve the prior
-			// summary or its inline findings: resolving a
-			// finding that hasn't actually been fixed is
-			// misleading — the operator would see "resolved"
-			// on something they should still be looking at.
-			// The new run will post a fresh summary at the
-			// top of the MR's activity feed (newest first in
-			// GitLab), and any new findings at locations
-			// that don't already have an unresolved prior
-			// finding. Prior findings remain in whatever
-			// state the operator left them in; the
-			// file:line dedup downstream prevents duplicate
-			// comments at the same location.
-			logger.Info("dedup: fresh review will run (different commit, prior not auto-resolved)",
+			// Different commit → run a fresh review AND
+			// extract the prior findings so the LLM can
+			// judge which are still valid vs. resolved by
+			// the new changes. The prior summary will be
+			// edited in place (not posted fresh) at the
+			// bottom of Run; the prior findings will be
+			// auto-resolved per the LLM's verdict.
+			//
+			// We use the same `discs` list for both the
+			// prior-summary lookup and the prior-findings
+			// extraction, so the dedup pre-check above
+			// serves as a free prior-findings data fetch.
+			priorFindings = extractPriorFindings(prior, discs, o.cfg.BotUsername)
+			logger.Info("dedup: fresh review will run; prior findings extracted for LLM context",
 				"prior_commit", prior.Commit,
 				"new_commit", mr.SHA,
 				"prior_summary_id", prior.SummaryDiscussionID,
-				"prior_findings", len(prior.FindingDiscussionIDs),
+				"prior_findings_total", len(prior.FindingDiscussionIDs),
+				"prior_findings_authored", len(priorFindings),
 			)
 		}
 	}
@@ -390,7 +426,24 @@ func (o *Orchestrator) Run(ctx context.Context, project any, iid int, action ...
 		// "missing artifacts that should have been here".
 		artifactSet = &artifact.Set{}
 	}
-	userPrompt := prompts.ReviewUserPrompt(meta, chunks, *artifactSet)
+	// Convert the reviewer's PriorFinding (which carries
+	// GitLab plumbing) to the prompts-package PriorFinding
+	// (which doesn't import internal/gitlab). The
+	// conversion drops the GitLab IDs — the LLM doesn't
+	// need them, the orchestrator keeps them on the
+	// reviewer-side copy for resolve-after-the-fact.
+	promptPrior := make([]prompts.PriorFinding, len(priorFindings))
+	for i, pf := range priorFindings {
+		promptPrior[i] = prompts.PriorFinding{
+			File:       pf.File,
+			Line:       pf.Line,
+			Severity:   "",
+			Category:   "",
+			Body:       pf.Body,
+			Suggestion: pf.Suggestion,
+		}
+	}
+	userPrompt := prompts.ReviewUserPrompt(meta, chunks, *artifactSet, promptPrior)
 
 	// Run the harness agent.
 	logger.Info("running review agent", "system_prompt_bytes", len(prompts.ReviewSystemPrompt()), "user_prompt_bytes", len(userPrompt))
@@ -439,10 +492,20 @@ func (o *Orchestrator) Run(ctx context.Context, project any, iid int, action ...
 	// that an earlier mreview run marked obsolete) is NOT in
 	// the set; we want the LLM to be free to surface a new
 	// finding at the same location if one really exists.
-	discs, err := o.cfg.GitLab.ListDiscussions(ctx, project, iid)
-	if err != nil {
-		logger.Warn("dedupe fetch failed; proceeding without dedupe", "err", err.Error())
-		discs = nil
+	//
+	// If we already fetched `discs` above (for the
+	// commit-level dedup), reuse that list. Otherwise
+	// (NoDedup set, or the prior-fetch failed) make the
+	// call now. Either way, the same `discs` list is also
+	// used later to resolve the prior findings the LLM
+	// marks resolved / out_of_scope.
+	if discs == nil {
+		var derr error
+		discs, derr = o.cfg.GitLab.ListDiscussions(ctx, project, iid)
+		if derr != nil {
+			logger.Warn("dedupe fetch failed; proceeding without dedupe", "err", derr.Error())
+			discs = nil
+		}
 	}
 	priorLocs := findPriorFindingLocations(discs, o.cfg.BotUsername)
 	logger.Info("dedupe set built (file:line, unresolved prior)",
@@ -458,29 +521,87 @@ func (o *Orchestrator) Run(ctx context.Context, project any, iid int, action ...
 		PolicyWarn:  policyRes.HasWarning,
 	}
 
-	// Post the summary (skip on update events).
-	//
-	// Dedup-marker wiring: we post the summary with the
-	// commit-only marker (no finding IDs yet — findings
-	// post AFTER this). After all findings are posted, we
-	// collect their discussion IDs and EDIT the summary
-	// note in place so the marker carries the full
-	// `commit=... findings=...` payload. The next mreview
-	// run reads this marker to decide skip-vs-update.
-	var postedFindingIDs []string
-	if !o.cfg.DryRun && act != "update" {
-		body := renderSummary(mr, resp.Summary, policyRes.Findings, nil)
-		if body != "" {
-			note, err := o.cfg.GitLab.PostSummary(ctx, project, iid, body)
-			if err != nil {
-				logger.Warn("post summary failed", "err", err.Error())
-			} else {
-				result.Summary = note
+	// Process the LLM's `prior_findings` response: classify
+	// each prior finding as keep (still_valid), resolve
+	// (resolved), or resolve+out-of-scope (out_of_scope).
+	// Anything the LLM didn't mention is treated as
+	// still_valid (the safe default — the LLM's silence
+	// shouldn't trigger an auto-resolve the operator didn't
+	// ask for).
+	priorActions := classifyPriorFindings(resp.PriorFindings, priorFindings, logger)
+
+	// Auto-resolve the prior findings the LLM marked
+	// resolved or out_of_scope. Best-effort: a 404 (the
+	// discussion was already deleted out-of-band) or any
+	// other error logs at warn and moves on; the rest of
+	// the review still posts. Done BEFORE the summary
+	// post/edit so the resolve threads collapse in the UI
+	// by the time the new summary lands.
+	if !o.cfg.DryRun {
+		for _, pf := range priorActions.resolve {
+			// ResolveDiscussion takes a string project,
+			// not the any-typed project the rest of the
+			// orchestrator uses. Convert here so the
+			// GitLab API can resolve a discussion
+			// regardless of whether the caller passed
+			// a project slug or a numeric ID.
+			projStr, ok := project.(string)
+			if !ok {
+				logger.Warn("prior-finding resolve skipped: project must be a string slug, got %T", project)
+				continue
+			}
+			if err := o.cfg.GitLab.ResolveDiscussion(ctx, projStr, iid, pf.DiscussionID); err != nil {
+				logger.Warn("prior-finding resolve failed",
+					"discussion_id", pf.DiscussionID,
+					"file", pf.File, "line", pf.Line,
+					"err", err.Error(),
+				)
 			}
 		}
 	}
 
-	// Post inline findings.
+	// Build the unified rows for the summary table:
+	//   1. New findings (post this run)
+	//   2. Carried-over prior findings (the LLM said still_valid)
+	//   3. Resolved prior findings (the LLM said resolved or
+	//      out_of_scope; included for the operator's history)
+	// Display order: new first, then carried-over, then
+	// resolved. Within each group, sort by file:line for
+	// stable rendering across runs.
+	resolvedEntries := make([]priorResolvedEntry, len(priorActions.resolve))
+	for i, pf := range priorActions.resolve {
+		resolvedEntries[i] = priorResolvedEntry{
+			Finding:   pf,
+			Status:    priorActions.resolveStatuses[i],
+			Rationale: priorActions.resolveRationale[i],
+		}
+	}
+	rows := buildSummaryRows(toPost, priorActions.carryOver, resolvedEntries)
+
+	// Order: post inline findings FIRST (so we have the
+	// new discussion IDs), then write the summary ONCE
+	// (with the full marker). The previous "post + edit
+	// fill-in" pattern required two round-trips because
+	// the post carried a commit-only marker; the new
+	// "post-findings + single-write" pattern is one
+	// round-trip, since we already know the carried-over
+	// IDs (from the prior summary's
+	// FindingDiscussionIDs) and can collect the new IDs
+	// in the same loop that posts the findings.
+	//
+	// For the prior-edit case: the single write is an
+	// EditSummary (PUT) of the prior note with the new
+	// body. For the first-run case: it's a PostSummary
+	// of a fresh note. Either way, exactly one summary
+	// round-trip.
+	//
+	// The previous `act == "update"` skip (which suppressed
+	// the summary write on push events) has been removed:
+	// the operator wants the summary to always reflect the
+	// current state, and the PUT-based edit doesn't bump
+	// the activity feed the way POST did, so the "fresh
+	// post on every push" spam is gone.
+	var postedFindingIDs []string
 	for _, f := range toPost {
 		meta := changeMetaFor(pathIndex(changes), f.File)
 		cmt := buildInlineComment(meta, f)
@@ -494,55 +615,75 @@ func (o *Orchestrator) Run(ctx context.Context, project any, iid int, action ...
 			result.Findings = append(result.Findings, PostedFinding{Finding: f, Skipped: true, Reason: err.Error()})
 			continue
 		}
-		// Capture the discussion ID so the dedup marker
-		// (added to the summary via EditSummary below) can
-		// reference it. Without this, the next mreview run
-		// can detect "prior summary at this SHA" but cannot
-		// resolve the prior inline findings when the SHA
-		// advances.
+		// Capture the discussion ID so the summary
+		// marker (written below) can reference it.
+		// Without this, the next mreview run can
+		// detect "prior summary at this SHA" but cannot
+		// resolve the prior inline findings when the
+		// SHA advances.
 		if disc != nil {
 			postedFindingIDs = append(postedFindingIDs, disc.ID)
 		}
 		result.Findings = append(result.Findings, PostedFinding{Finding: f})
 	}
 
-	// Edit the summary in place to add the full marker (with
-	// the inline-finding IDs we just posted). The summary was
-	// posted above with a commit-only marker; this one PUT
-	// round-trip fills in the findings= slot. Skipped when
-	// there are no findings to record — the commit-only
-	// marker is already correct — and when DryRun skipped
-	// the posts.
-	if !o.cfg.DryRun && len(postedFindingIDs) > 0 && result.Summary != nil {
-		fullBody := renderSummary(mr, resp.Summary, policyRes.Findings, postedFindingIDs)
-		if _, err := o.cfg.GitLab.EditSummary(ctx, project, iid, result.Summary.ID, fullBody); err != nil {
-			logger.Warn("summary marker edit failed",
-				"note_id", result.Summary.ID,
-				"err", err.Error(),
-			)
+	// Marker finding-IDs: the next run's "prior findings"
+	// are the inline discussions still open after this
+	// run, i.e. the new IDs we just posted + the
+	// carried-over IDs (the resolved IDs are
+	// auto-collapsed, so the next run's prior-set
+	// shouldn't see them as still-open).
+	markerFindingIDs := append(priorActions.carryOverIDs, postedFindingIDs...)
+
+	// Write the summary: edit-in-place when a prior
+	// exists, post-fresh otherwise. One round-trip in
+	// either case. Skipped on dry-run (no findings
+	// were posted, so the body would be empty; the
+	// dry-run path is for testing the orchestrator
+	// without side effects, not for producing a real
+	// summary).
+	if !o.cfg.DryRun {
+		body := renderSummary(mr, resp.Summary, rows, markerFindingIDs)
+		if prior != nil && prior.SummaryDiscussionID != "" {
+			// Edit in place. We need the note ID (not
+			// the discussion ID); look it up from the
+			// prior discussion's first note.
+			priorNoteID := int64(0)
+			for _, d := range discs {
+				if d.ID == prior.SummaryDiscussionID && len(d.Notes) > 0 {
+					priorNoteID = d.Notes[0].ID
+					break
+				}
+			}
+			if priorNoteID > 0 {
+				edited, err := o.cfg.GitLab.EditSummary(ctx, project, iid, priorNoteID, body)
+				if err != nil {
+					logger.Warn("summary edit failed", "err", err.Error())
+				} else {
+					result.Summary = edited
+				}
+			} else {
+				logger.Warn("summary edit skipped: prior note ID not found",
+					"prior_summary_id", prior.SummaryDiscussionID,
+				)
+			}
+		} else {
+			note, err := o.cfg.GitLab.PostSummary(ctx, project, iid, body)
+			if err != nil {
+				logger.Warn("post summary failed", "err", err.Error())
+			} else {
+				result.Summary = note
+			}
 		}
 	}
 
-	return result, nil
-}
-
-// findPriorSummary fetches the MR's existing discussions and
-// returns the most recent mreview summary (identified by the
-// dedup marker in its first note body), or nil if no prior
-// summary exists. Errors are returned to the caller; the
-// caller chooses whether to fail-closed or fail-open.
-//
-// This is a method (not a free function) so it stays near
-// the orchestrator that owns the dedup policy.
-func (o *Orchestrator) findPriorSummary(ctx context.Context, project any, iid int, logger *slog.Logger) (*PriorReview, error) {
-	discs, err := o.cfg.GitLab.ListDiscussions(ctx, project, iid)
-	if err != nil {
-		return nil, err
-	}
-	logger.Debug("dedup: scanned existing discussions",
-		"project", project, "iid", iid, "discussions", len(discs),
+	logger.Info("review complete",
+		"new_findings_posted", len(postedFindingIDs),
+		"prior_findings_carried_over", len(priorActions.carryOver),
+		"prior_findings_resolved", len(priorActions.resolve),
 	)
-	return FindPriorMReviewSummary(discs), nil
+
+	return result, nil
 }
 
 // applyPolicy runs the loaded policy against the agent's
@@ -698,25 +839,44 @@ func buildInlineComment(meta gitlab.ChangeFile, f Finding) gitlab.InlineComment 
 	return cmt
 }
 
+// SummaryRow is one entry in the findings table. Carries
+// everything the renderer needs to draw a row for any of
+// the three categories (new / carried-over / resolved).
+//
+// The orchestrator builds SummaryRow values from the LLM's
+// response: new findings from resp.Findings, carried-over
+// and resolved rows from resp.PriorFindings joined with
+// the prior-finding data (file, line, body, GitLab
+// discussion/note IDs). The Status field drives both the
+// Status column's emoji and the row's display position.
+type SummaryRow struct {
+	File      string
+	Line      int
+	Severity  string // LLM-assigned for new; "(prior)" for carried-over / resolved
+	Category  string // LLM-assigned for new; "(prior)" for carried-over / resolved
+	Body      string
+	Status    FindingStatus
+	Rationale string // resolved / out_of_scope only; suffixed to body
+}
+
 // renderSummary is the human-readable verdict the orchestrator
-// posts as a single MR-level note. Kept here for now; a future
-// PR may move it into internal/prompts for templating parity
-// with the system prompt.
+// posts (or edits in place) as a single MR-level note. Kept
+// here for now; a future PR may move it into internal/prompts
+// for templating parity with the system prompt.
 //
 // The Findings section is rendered as a Markdown table
-// (severity emoji + verdict, file path, line, category, body)
-// rather than a bullet list. The earlier bullet-list form
-// (`%s **%s** \`%s:%d\` — %s\n`) was rendering as one
-// squashed paragraph in GitLab because (a) adjacent bullets
-// without a blank line collapse into a single line block and
-// (b) long bodies wrap without internal breaks. The table
-// gives each finding its own row with the body in its own
-// cell — GitLab renders each row as a distinct line — and
-// inline `<br>` separators keep multi-line bodies readable
-// inside the cell.
+// (Status, Severity, File, Line, Category, Description) with
+// each row's status driving a leading emoji. The Status
+// column is the new piece: it tells the operator at a
+// glance which findings are new since the last run, which
+// were carried over (still valid in the new diff), and
+// which were resolved by the new changes. A table rather
+// than a bullet list (the older form) so each finding
+// keeps its own line in GitLab's rendering and multi-line
+// bodies stay readable via in-cell `<br>` separators.
 //
 // The whole table is wrapped in GitLab-Flavored Markdown's
-// <details> collapsible block, with the finding count in the
+// <details> collapsible block, with the row count in the
 // <summary>. Default GitLab rendering collapses the body of
 // the comment to a single click-to-expand row, which keeps
 // the human-readable summary at top without a long table
@@ -732,13 +892,15 @@ func buildInlineComment(meta gitlab.ChangeFile, f Finding) gitlab.InlineComment 
 // Dedup marker: when mr.SHA is non-empty, the body is
 // preceded by a hidden HTML comment carrying the commit SHA
 // and the inline-finding discussion IDs that this run
-// posted. The next mreview run on this MR reads the marker
-// to (1) skip if the SHA matches, or (2) resolve the prior
-// findings and post fresh ones if the SHA differs. The
-// marker is invisible in GitLab's rendered view. See
-// marker.go (FormatMarkerLine / ParseMarkerLine) for the
-// wire format.
-func renderSummary(mr *gitlab.MergeRequest, summary string, findings []policy.EnforcedFinding, findingIDs []string) string {
+// considers "live" (new + carried-over — resolved findings
+// are auto-collapsed and don't need to be tracked by the
+// next run). The next mreview run on this MR reads the
+// marker to (1) skip if the SHA matches, or (2) extract the
+// prior findings for the LLM to evaluate if the SHA
+// differs. The marker is invisible in GitLab's rendered
+// view. See marker.go (FormatMarkerLine / ParseMarkerLine)
+// for the wire format.
+func renderSummary(mr *gitlab.MergeRequest, summary string, rows []SummaryRow, findingIDs []string) string {
 	var b strings.Builder
 	if mr != nil && mr.SHA != "" {
 		b.WriteString(FormatMarkerLine(mr.SHA, findingIDs))
@@ -754,23 +916,42 @@ func renderSummary(mr *gitlab.MergeRequest, summary string, findings []policy.En
 	// table is required — GitLab's markdown parser only
 	// recognises a markdown table when it follows an empty
 	// line, even inside an HTML block.
-	fmt.Fprintf(&b, "<details>\n<summary>Findings (%d)</summary>\n\n", len(findings))
-	if len(findings) == 0 {
+	fmt.Fprintf(&b, "<details>\n<summary>Findings (%d)</summary>\n\n", len(rows))
+	if len(rows) == 0 {
 		b.WriteString("No issues found.\n")
 	} else {
-		b.WriteString("| Severity | File | Line | Category | Description |\n")
-		b.WriteString("|----------|------|-----:|----------|-------------|\n")
-		for _, f := range findings {
-			emoji := "•"
-			switch policy.Severity(f.Verdict) {
-			case policy.SeverityError:
-				emoji = "🛑"
-			case policy.SeverityWarning:
-				emoji = "⚠️"
-			case policy.SeverityInfo:
-				emoji = "ℹ️"
+		b.WriteString("| Status | Severity | File | Line | Category | Description |\n")
+		b.WriteString("|--------|----------|------|-----:|----------|-------------|\n")
+		for _, r := range rows {
+			// Severity column: LLM-assigned severity with
+			// a leading emoji (🛑 error / ⚠️ warning /
+			// ℹ️ info) for new findings, "(prior)"
+			// placeholder for carried-over and resolved.
+			// The carried-over / resolved rows show the
+			// original finding body (from the GitLab
+			// note), not a re-rendered severity — the
+			// original severity is visible by clicking
+			// through to the (open or auto-resolved)
+			// discussion.
+			severity := r.Severity
+			severityPrefix := ""
+			if r.Status == StatusStillValid || r.Status == StatusResolved || r.Status == StatusOutOfScope {
+				severity = "(prior)"
+			} else {
+				severityPrefix = severityEmoji(r.Severity) + " "
 			}
-			body := strings.TrimSpace(f.Body)
+			category := r.Category
+			if r.Status == StatusStillValid || r.Status == StatusResolved || r.Status == StatusOutOfScope {
+				category = "(prior)"
+			}
+			body := strings.TrimSpace(r.Body)
+			// For resolved / out_of_scope, append the LLM's
+			// rationale so the operator can see WHY the
+			// prior finding was marked resolved (without
+			// clicking through to the now-collapsed thread).
+			if r.Rationale != "" && (r.Status == StatusResolved || r.Status == StatusOutOfScope) {
+				body = body + "<br><em>Resolved: " + strings.TrimSpace(r.Rationale) + "</em>"
+			}
 			// Markdown tables render newlines as a literal space
 			// inside a cell; <br> is the documented GitLab-Flavored
 			// Markdown escape for an in-cell line break.
@@ -778,8 +959,9 @@ func renderSummary(mr *gitlab.MergeRequest, summary string, findings []policy.En
 			body = strings.ReplaceAll(body, "\n", "<br>")
 			// Pipe would terminate the row; backslash-escape.
 			body = strings.ReplaceAll(body, "|", `\|`)
-			fmt.Fprintf(&b, "| %s %s | `%s` | %d | %s | %s |\n",
-				emoji, f.Verdict, f.File, f.Line, f.Category, body)
+			fmt.Fprintf(&b, "| %s %s | %s%s | `%s` | %d | %s | %s |\n",
+				r.Status.Emoji(), r.Status.DisplayLabel(),
+				severityPrefix, severity, r.File, r.Line, category, body)
 		}
 	}
 	// Trailing blank line then </details> — same reason as
