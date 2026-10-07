@@ -226,7 +226,7 @@ mreview:
     - mreview review
         --repo="$CI_PROJECT_PATH"
         --mr="$CI_MERGE_REQUEST_IID"
-        --gitlab-url="$CI_SERVER_URL"
+        --gitlab-url="$CI_API_V4_URL"
         --gitlab-token="$GITLAB_TOKEN_CI"
         --provider=local
         --provider-base-url="$LLM_URL"
