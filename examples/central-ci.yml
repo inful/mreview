@@ -150,7 +150,7 @@ mreview:
     - tokensave-sync
   script:
     - mreview review
-        --repo="$CI_PROJECT_PATH"
+        --repo-id="$CI_PROJECT_ID"
         --mr="$CI_MERGE_REQUEST_IID"
         --gitlab-url="$CI_API_V4_URL"
         --gitlab-token="$GITLAB_TOKEN_CI"
