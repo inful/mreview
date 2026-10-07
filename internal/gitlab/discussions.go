@@ -14,9 +14,11 @@ import (
 // (≤20 discussions) one call is enough. For larger MRs the
 // caller can iterate via the returned slice + opt.Page (future
 // enhancement).
-func (c *Client) ListDiscussions(ctx context.Context, project string, iid int) ([]Discussion, error) {
-	if err := validatePath(project); err != nil {
-		return nil, err
+func (c *Client) ListDiscussions(ctx context.Context, project any, iid int) ([]Discussion, error) {
+	if s, ok := project.(string); ok {
+		if err := validatePath(s); err != nil {
+			return nil, err
+		}
 	}
 	if iid <= 0 {
 		return nil, fmt.Errorf("gitlab: merge request IID must be > 0, got %d", iid)

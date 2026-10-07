@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/inful/mreview/internal/reviewer"
@@ -13,11 +14,12 @@ import (
 // lastProject / lastIID to assert runReview used the seam
 // correctly.
 //
-// Lives in a separate file from the production code so the
-// //nolint:testpackage boundary is clear (this type would
-// also need to be excluded from production binaries in a
-// separate-compilation world, but Go's test build tags make
-// _test.go files inert in the production build).
+// lastProject is stored as a string (via fmt.Sprint) for
+// convenience: most tests want to assert on the value
+// passed in, which is either a string path or a numeric ID
+// formatted to its string representation. Tests that care
+// about the int-vs-string distinction can read the
+// lastProjectKind field.
 type fakeReviewer struct {
 	// Canned return values. err wins over result when both
 	// are set.
@@ -25,19 +27,30 @@ type fakeReviewer struct {
 	err    error
 
 	// Call assertions.
-	callCount   int
-	lastCtx     context.Context
-	lastProject string
-	lastIID     int
-	lastAction  string
+	callCount       int
+	lastCtx         context.Context
+	lastProject     string // string form of project, for assertions
+	lastProjectKind string // "string" or "int", for type-distinction assertions
+	lastIID         int
+	lastAction      string
 }
 
 // Run satisfies reviewerInterface. Records the call, then
 // returns the canned values.
-func (f *fakeReviewer) Run(ctx context.Context, project string, iid int, action ...string) (*reviewer.Result, error) {
+func (f *fakeReviewer) Run(ctx context.Context, project any, iid int, action ...string) (*reviewer.Result, error) {
 	f.callCount++
 	f.lastCtx = ctx
-	f.lastProject = project
+	switch v := project.(type) {
+	case string:
+		f.lastProject = v
+		f.lastProjectKind = "string"
+	case int:
+		f.lastProject = fmt.Sprintf("%d", v)
+		f.lastProjectKind = "int"
+	default:
+		f.lastProject = fmt.Sprintf("%v", v)
+		f.lastProjectKind = "other"
+	}
 	f.lastIID = iid
 	if len(action) > 0 {
 		f.lastAction = action[0]

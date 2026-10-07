@@ -42,9 +42,11 @@ func (c ChangeFile) Path() string {
 // Diff is the raw unified diff text. Empty for binary files — the
 // caller should detect that and skip those when building chunks for
 // the LLM.
-func (c *Client) FetchChanges(ctx context.Context, project string, iid int) ([]ChangeFile, error) {
-	if err := validatePath(project); err != nil {
-		return nil, err
+func (c *Client) FetchChanges(ctx context.Context, project any, iid int) ([]ChangeFile, error) {
+	if s, ok := project.(string); ok {
+		if err := validatePath(s); err != nil {
+			return nil, err
+		}
 	}
 	if iid <= 0 {
 		return nil, fmt.Errorf("gitlab: merge request IID must be > 0, got %d", iid)

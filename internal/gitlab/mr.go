@@ -49,17 +49,26 @@ type DiffRefs struct {
 	StartSHA string `json:"start_sha"`
 }
 
-// FetchMR fetches a merge request by project path and IID.
+// FetchMR fetches a merge request by project identifier and IID.
 //
-// The project path is the GitLab URL slug (e.g. "group/project"),
-// NOT the numeric project ID — the official client accepts both, but
-// the slug is what every webhook payload carries.
+// project may be either a string (the GitLab URL slug,
+// e.g. "group/project") or an int (the numeric project ID).
+// The official client-go SDK accepts both shapes; the int form
+// is preferred for self-hosted setups where URL-encoding the
+// project path is unreliable (some NGINX configs decode %2F
+// to / before routing).
+//
+// validatePath is only run for string projects; int projects
+// skip it because there is nothing to validate (the path was
+// already validated when the user typed it).
 //
 // Errors are typed via (*Client).classify so callers can switch on
 // Kind without parsing the HTTP status.
-func (c *Client) FetchMR(ctx context.Context, project string, iid int) (*MergeRequest, error) {
-	if err := validatePath(project); err != nil {
-		return nil, err
+func (c *Client) FetchMR(ctx context.Context, project any, iid int) (*MergeRequest, error) {
+	if s, ok := project.(string); ok {
+		if err := validatePath(s); err != nil {
+			return nil, err
+		}
 	}
 	if iid <= 0 {
 		return nil, fmt.Errorf("gitlab: merge request IID must be > 0, got %d", iid)
@@ -67,7 +76,7 @@ func (c *Client) FetchMR(ctx context.Context, project string, iid int) (*MergeRe
 
 	var result *MergeRequest
 	op := "FetchMR"
-	url := fmt.Sprintf("%s/projects/%s/merge_requests/%d", c.baseURL, project, iid)
+	url := fmt.Sprintf("%s/projects/%v/merge_requests/%d", c.baseURL, project, iid)
 	err := doWithRetry(ctx, c.retry, op, func(ctx context.Context, attempt int) error {
 		mr, resp, err := c.inner.MergeRequests.GetMergeRequest(project, int64(iid), nil)
 		if err != nil {

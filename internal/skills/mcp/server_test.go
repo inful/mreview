@@ -16,11 +16,11 @@ import (
 // pre-populated cache, then exercise the handler.
 type nopFetcher struct{}
 
-func (nopFetcher) ListRepositoryTree(context.Context, string, string, string) ([]gitlab.TreeNode, error) {
+func (nopFetcher) ListRepositoryTree(_ context.Context, _ any, _, _ string) ([]gitlab.TreeNode, error) {
 	return nil, nil
 }
 
-func (nopFetcher) GetRepositoryFileRaw(context.Context, string, string, string) ([]byte, error) {
+func (nopFetcher) GetRepositoryFileRaw(_ context.Context, _ any, _, _ string) ([]byte, error) {
 	return nil, nil
 }
 
@@ -54,11 +54,11 @@ type listFetcher struct {
 	bodies map[string][]byte
 }
 
-func (f *listFetcher) ListRepositoryTree(context.Context, string, string, string) ([]gitlab.TreeNode, error) {
+func (f *listFetcher) ListRepositoryTree(_ context.Context, _ any, _, _ string) ([]gitlab.TreeNode, error) {
 	return f.list, nil
 }
 
-func (f *listFetcher) GetRepositoryFileRaw(_ context.Context, _, p, _ string) ([]byte, error) {
+func (f *listFetcher) GetRepositoryFileRaw(_ context.Context, project any, p, _ string) ([]byte, error) {
 	return f.bodies[p], nil
 }
 

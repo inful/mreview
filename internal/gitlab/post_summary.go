@@ -14,9 +14,11 @@ import (
 //
 // Errors are typed via (*Client).classify; the caller can switch on
 // Kind to distinguish auth failures from project locks (409) etc.
-func (c *Client) PostSummary(ctx context.Context, project string, iid int, body string) (*Note, error) {
-	if err := validatePost(project, iid, body); err != nil {
-		return nil, err
+func (c *Client) PostSummary(ctx context.Context, project any, iid int, body string) (*Note, error) {
+	if s, ok := project.(string); ok {
+		if err := validatePost(s, iid, body); err != nil {
+			return nil, err
+		}
 	}
 	var result *Note
 	op := "PostSummary"

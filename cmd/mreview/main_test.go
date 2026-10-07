@@ -133,13 +133,33 @@ func findJSONLineWith(s, key string) string {
 	return ""
 }
 
-func TestRun_ReviewSubcommand_MissingRequiredRepo(t *testing.T) {
-	_, stderr, code := runWithArgs(t, "review", "--mr=1", "--gitlab-token=test")
+// TestRun_ReviewSubcommand_MissingProjectIdentifier asserts
+// that runReview exits with ExitConfig when neither --repo
+// nor --repo-id is set. Since v0.9.4, --repo is no longer
+// required (--repo-id is the recommended form, and in CI
+// $CI_PROJECT_ID auto-populates --repo-id via kong's env
+// binding).
+//
+// The test sets --workdir to a temp dir so the workdir
+// fail-fast check doesn't fire first — we want the test to
+// reach the project-identifier validation specifically.
+func TestRun_ReviewSubcommand_MissingProjectIdentifier(t *testing.T) {
+	t.Setenv("MREVIEW_WORKDIR", "")
+	_, stderr, code := runWithArgs(t, "review",
+		"--mr=1",
+		"--gitlab-token=test",
+		"--workdir="+t.TempDir(),
+	)
 	if code != ExitConfig {
-		t.Errorf("missing --repo returned %d, want %d", code, ExitConfig)
+		t.Errorf("missing project identifier returned %d, want %d", code, ExitConfig)
 	}
+	// Error message should mention both --repo and --repo-id
+	// (the validation suggests the two options).
 	if !strings.Contains(stderr, "--repo") {
 		t.Errorf("expected '--repo' in stderr, got: %q", stderr)
+	}
+	if !strings.Contains(stderr, "--repo-id") {
+		t.Errorf("expected '--repo-id' in stderr, got: %q", stderr)
 	}
 }
 

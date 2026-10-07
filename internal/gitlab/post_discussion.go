@@ -16,9 +16,11 @@ import (
 // The diffRefs are required by GitLab to anchor the comment — every
 // inline position MUST carry base_sha, start_sha, head_sha or
 // GitLab returns 400.
-func (c *Client) PostDiscussion(ctx context.Context, project string, iid int, refs DiffRefs, cmt InlineComment) (*Discussion, error) {
-	if err := validatePath(project); err != nil {
-		return nil, err
+func (c *Client) PostDiscussion(ctx context.Context, project any, iid int, refs DiffRefs, cmt InlineComment) (*Discussion, error) {
+	if s, ok := project.(string); ok {
+		if err := validatePath(s); err != nil {
+			return nil, err
+		}
 	}
 	if iid <= 0 {
 		return nil, fmt.Errorf("gitlab: merge request IID must be > 0, got %d", iid)

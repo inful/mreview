@@ -20,9 +20,11 @@ import (
 // post, no edit on GitLab's "Show all notes" timeline.
 //
 // Errors are typed via (*Client).classify.
-func (c *Client) EditSummary(ctx context.Context, project string, iid int, noteID int64, body string) (*Note, error) {
-	if err := validatePath(project); err != nil {
-		return nil, err
+func (c *Client) EditSummary(ctx context.Context, project any, iid int, noteID int64, body string) (*Note, error) {
+	if s, ok := project.(string); ok {
+		if err := validatePost(s, iid, body); err != nil {
+			return nil, err
+		}
 	}
 	if iid <= 0 {
 		return nil, fmt.Errorf("gitlab: merge request IID must be > 0, got %d", iid)

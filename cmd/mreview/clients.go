@@ -124,7 +124,12 @@ type clientDeps struct {
 // test-injection surface stays with the package that uses it
 // and the abstraction doesn't leak to downstream packages.
 type reviewerInterface interface {
-	Run(ctx context.Context, project string, iid int, action ...string) (*reviewer.Result, error)
+	// Run executes the full review pipeline. project may be
+	// either a string (GitLab URL slug, e.g. "group/project")
+	// or an int (numeric project ID); both are accepted by the
+	// underlying SDK. The CLI layer resolves the operator's
+	// --repo / --repo-id input into the right shape.
+	Run(ctx context.Context, project any, iid int, action ...string) (*reviewer.Result, error)
 }
 
 // reviewRunner is the function runReview uses to build the

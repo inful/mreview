@@ -97,9 +97,15 @@ func (s Skill) IsBundled() bool {
 
 // SkillFetcher is the transport-side dependency for remote
 // skills. Satisfied by *gitlab.Client; fakes drive unit tests.
+//
+// project may be either a string (GitLab URL slug, e.g.
+// "group/project") or an int (numeric project ID); both are
+// accepted by the underlying GitLab client. Numeric IDs avoid
+// the URL-encoding issues that some self-hosted setups have
+// with the project path.
 type SkillFetcher interface {
-	ListRepositoryTree(ctx context.Context, project, path, ref string) ([]gitlab.TreeNode, error)
-	GetRepositoryFileRaw(ctx context.Context, project, path, ref string) ([]byte, error)
+	ListRepositoryTree(ctx context.Context, project any, path, ref string) ([]gitlab.TreeNode, error)
+	GetRepositoryFileRaw(ctx context.Context, project any, path, ref string) ([]byte, error)
 }
 
 // Config bundles the inputs to New. New takes a Config rather

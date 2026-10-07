@@ -191,7 +191,18 @@ type PostedFinding struct {
 // when the orchestrator runs from a webhook context. Empty
 // means "called from the CLI directly" and behaves like
 // `open`.
-func (o *Orchestrator) Run(ctx context.Context, project string, iid int, action ...string) (*Result, error) {
+// Run executes the full review pipeline for one MR. project
+// is either a string (GitLab URL slug, e.g. "group/project") or
+// an int (numeric project ID); both are accepted by the
+// underlying client-go SDK. In CI, the numeric ID is
+// preferred because it sidesteps URL-encoding issues that
+// some self-hosted NGINX configs have with the project path.
+//
+// The optional action parameter carries the GitLab MR action
+// (open / reopen / update / close / merge) — passed only when
+// the orchestrator runs from a webhook context. Empty means
+// "called from the CLI directly" and behaves like `open`.
+func (o *Orchestrator) Run(ctx context.Context, project any, iid int, action ...string) (*Result, error) {
 	act := ""
 	if len(action) > 0 {
 		act = action[0]
@@ -523,7 +534,7 @@ func (o *Orchestrator) Run(ctx context.Context, project string, iid int, action 
 //
 // This is a method (not a free function) so it stays near
 // the orchestrator that owns the dedup policy.
-func (o *Orchestrator) findPriorSummary(ctx context.Context, project string, iid int, logger *slog.Logger) (*PriorReview, error) {
+func (o *Orchestrator) findPriorSummary(ctx context.Context, project any, iid int, logger *slog.Logger) (*PriorReview, error) {
 	discs, err := o.cfg.GitLab.ListDiscussions(ctx, project, iid)
 	if err != nil {
 		return nil, err

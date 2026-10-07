@@ -37,9 +37,11 @@ type TreeNode struct {
 // realistic skills directory size. For projects with more
 // entries, callers can iterate via the returned slice + opt.Page
 // (future enhancement).
-func (c *Client) ListRepositoryTree(ctx context.Context, project, path, ref string) ([]TreeNode, error) {
-	if err := validatePath(project); err != nil {
-		return nil, err
+func (c *Client) ListRepositoryTree(ctx context.Context, project any, path, ref string) ([]TreeNode, error) {
+	if s, ok := project.(string); ok {
+		if err := validatePath(s); err != nil {
+			return nil, err
+		}
 	}
 
 	var result []TreeNode
@@ -97,9 +99,11 @@ func (c *Client) ListRepositoryTree(ctx context.Context, project, path, ref stri
 //
 // ref is the branch / tag / SHA — same semantics as
 // ListRepositoryTree.
-func (c *Client) GetRepositoryFileRaw(ctx context.Context, project, path, ref string) ([]byte, error) {
-	if err := validatePath(project); err != nil {
-		return nil, err
+func (c *Client) GetRepositoryFileRaw(ctx context.Context, project any, path, ref string) ([]byte, error) {
+	if s, ok := project.(string); ok {
+		if err := validatePath(s); err != nil {
+			return nil, err
+		}
 	}
 	if path == "" {
 		return nil, fmt.Errorf("gitlab: file path is required")

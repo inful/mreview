@@ -3,6 +3,7 @@ package skills
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -30,17 +31,25 @@ type fakeFetcher struct {
 	lastFetchRef     string
 }
 
-func (f *fakeFetcher) ListRepositoryTree(_ context.Context, project, path, ref string) ([]gitlab.TreeNode, error) {
+func (f *fakeFetcher) ListRepositoryTree(_ context.Context, project any, path, ref string) ([]gitlab.TreeNode, error) {
 	f.listCalls++
-	f.lastListProject = project
+	if s, ok := project.(string); ok {
+		f.lastListProject = s
+	} else {
+		f.lastListProject = fmt.Sprintf("%v", project)
+	}
 	f.lastListPath = path
 	f.lastListRef = ref
 	return f.listResp, f.listErr
 }
 
-func (f *fakeFetcher) GetRepositoryFileRaw(_ context.Context, project, p, ref string) ([]byte, error) {
+func (f *fakeFetcher) GetRepositoryFileRaw(_ context.Context, project any, p, ref string) ([]byte, error) {
 	f.fetchCalls++
-	f.lastFetchProject = project
+	if s, ok := project.(string); ok {
+		f.lastFetchProject = s
+	} else {
+		f.lastFetchProject = fmt.Sprintf("%v", project)
+	}
 	f.lastFetchPath = p
 	f.lastFetchRef = ref
 	if f.fileErr != nil {
@@ -58,11 +67,11 @@ type pathAwareFetcher struct {
 	list   []gitlab.TreeNode
 }
 
-func (f *pathAwareFetcher) ListRepositoryTree(_ context.Context, _, _, _ string) ([]gitlab.TreeNode, error) {
+func (f *pathAwareFetcher) ListRepositoryTree(_ context.Context, project any, _, _ string) ([]gitlab.TreeNode, error) {
 	return f.list, nil
 }
 
-func (f *pathAwareFetcher) GetRepositoryFileRaw(_ context.Context, _, p, _ string) ([]byte, error) {
+func (f *pathAwareFetcher) GetRepositoryFileRaw(_ context.Context, project any, p, _ string) ([]byte, error) {
 	if err, ok := f.failOn[p]; ok {
 		return nil, err
 	}

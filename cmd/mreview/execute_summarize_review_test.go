@@ -71,7 +71,7 @@ func TestExecuteReview_GitLabError_Mapping(t *testing.T) {
 			result, err := executeReview(context.Background(), fake, &ReviewCmd{
 				Repo: "foo/bar",
 				MR:   42,
-			}, logger)
+			}, "foo/bar", logger)
 
 			if result != nil {
 				t.Errorf("expected nil result on error, got %+v", result)
@@ -112,7 +112,7 @@ func TestExecuteReview_NonGitLabError_MapsToInternal(t *testing.T) {
 	_, err := executeReview(context.Background(), fake, &ReviewCmd{
 		Repo: "foo/bar",
 		MR:   42,
-	}, logger)
+	}, "foo/bar", logger)
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -144,7 +144,7 @@ func TestExecuteReview_Success_ReturnsResult(t *testing.T) {
 	got, err := executeReview(context.Background(), fake, &ReviewCmd{
 		Repo: "foo/bar",
 		MR:   42,
-	}, logger)
+	}, "foo/bar", logger)
 	if err != nil {
 		t.Fatalf("expected nil error, got %v", err)
 	}

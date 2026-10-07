@@ -23,8 +23,25 @@ import (
 // gone — the harness library owns the provider matrix; mreview
 // only picks the provider name + supplies a few tunables.
 type ReviewCmd struct {
-	Repo string `required:"" help:"Repository path (group/project)."`
-	MR   int    `required:"" name:"mr" help:"Merge request IID."`
+	// Repo is the project path (e.g. "group/project"). Optional
+	// when RepoID is set; exactly one of Repo or RepoID must
+	// be present.
+	//
+	// RepoID is the numeric project ID. Defaults to
+	// $CI_PROJECT_ID when running in GitLab CI, so the common
+	// case (running in a pipeline) needs no flag at all.
+	// Use RepoID (or the env var) for self-hosted setups
+	// where the URL-encoded project path is unreliable
+	// (some NGINX configs decode %2F to / before routing,
+	// which breaks multi-segment paths).
+	//
+	// The project ID is more reliable than the path: it
+	// avoids URL-encoding entirely, doesn't depend on the
+	// project's namespace, and routes through the GitLab
+	// API's index lookup rather than the path parser.
+	Repo   string `name:"repo" help:"Repository path (group/project). Required unless --repo-id is set (or env CI_PROJECT_ID is set, in which case --repo-id is the default)."`
+	RepoID int    `name:"repo-id" help:"Numeric project ID. Defaults to env CI_PROJECT_ID. More reliable than --repo on self-hosted setups with URL-encoding issues." env:"CI_PROJECT_ID"`
+	MR     int    `required:"" name:"mr" help:"Merge request IID."`
 
 	// GitLab connection.
 	// GitLabURL is the GitLab API root URL. Either the full
@@ -260,12 +277,22 @@ func runReview(parentCtx context.Context, stdout io.Writer, c *ReviewCmd, cfg *c
 		return err
 	}
 
+	// Project identifier: prefer the numeric ID (RepoID,
+	// auto-populated from $CI_PROJECT_ID in CI) over the
+	// path-based Repo. The numeric form sidesteps URL-encoding
+	// issues that some self-hosted setups have with the
+	// project path. resolveProject enforces exactly-one-of.
+	project, err := resolveProject(c.Repo, c.RepoID)
+	if err != nil {
+		return logWithError(logger, ExitConfig, "project identifier", err)
+	}
+
 	rev, err := loadReviewer(parentCtx, c, prep, logger)
 	if err != nil {
 		return err
 	}
 
-	result, err := executeReview(parentCtx, rev, c, logger)
+	result, err := executeReview(parentCtx, rev, c, project, logger)
 	if err != nil {
 		return err
 	}
@@ -460,8 +487,13 @@ func loadReviewer(parentCtx context.Context, c *ReviewCmd, prep *preparedReview,
 // to a typed *ExitError. The gitlab.Error.Kind -> exit
 // code mapping is the only switch in the package; the test
 // in review_errors_test.go pins every case in one place.
-func executeReview(parentCtx context.Context, rev reviewerInterface, c *ReviewCmd, logger *slog.Logger) (*reviewer.Result, error) {
-	result, err := rev.Run(parentCtx, c.Repo, c.MR)
+//
+// project is the resolved project identifier (string path
+// or int ID) computed by resolveProject in runReview. The
+// orchestrator passes it through to every GitLab API call
+// in the wrapper client.
+func executeReview(parentCtx context.Context, rev reviewerInterface, c *ReviewCmd, project any, logger *slog.Logger) (*reviewer.Result, error) {
+	result, err := rev.Run(parentCtx, project, c.MR)
 	if err != nil {
 		// Map gitlab.Error.Kind → typed ExitError.
 		var ge *gitlab.Error
@@ -507,6 +539,29 @@ func summarizeReview(result *reviewer.Result, stdout io.Writer, logger *slog.Log
 		return &ExitError{Code: ExitPolicy, Reason: "policy violation"}
 	}
 	return nil
+}
+
+// resolveProject picks the project identifier for the
+// orchestrator and SDK calls. It returns:
+//   - the int RepoID if non-zero (preferred for self-hosted
+//     setups where URL-encoding the path is unreliable;
+//     in CI this is auto-populated from $CI_PROJECT_ID),
+//   - the string Repo otherwise.
+//
+// Returns an error when both are unset (no way to identify
+// the project) or both are set (ambiguous; the operator
+// must pick one).
+func resolveProject(repo string, repoID int) (any, error) {
+	if repo == "" && repoID == 0 {
+		return nil, errors.New("must specify --repo (path) or --repo-id (numeric); in CI, --repo-id defaults to $CI_PROJECT_ID")
+	}
+	if repo != "" && repoID != 0 {
+		return nil, errors.New("specify only one of --repo (path) or --repo-id (numeric), not both")
+	}
+	if repoID != 0 {
+		return repoID, nil
+	}
+	return repo, nil
 }
 
 // logWithError logs at error level and returns a typed
