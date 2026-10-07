@@ -4,13 +4,18 @@
 // state without pulling in go-git as a dependency (which would
 // add roughly 5 MiB to the binary and ~30 transitive deps).
 //
-// The distroless runtime image (cmd/mreview/Dockerfile) does
-// NOT bundle a `git` binary, by design — see the Dockerfile
-// comments on adding yet-another-binary. As a result, every
-// function in this package returns a graceful no-op when
-// `git` is not on PATH. That is the expected behaviour in CI;
-// it lets the same binary work for local dev (where git is
-// usually available) without forcing the image to grow.
+// The debug Docker image (cmd/mreview/Dockerfile.debug)
+// bundles `git` at /usr/local/bin/git so the orchestrator's
+// branch sanity check actually fires in CI. The production
+// image (cmd/mreview/Dockerfile) deliberately does NOT bundle
+// a `git` binary, by design — see that Dockerfile's comments
+// on adding yet-another-binary. As a result, every function
+// in this package returns a graceful no-op when `git` is not
+// on PATH. That is the expected behaviour for the production
+// image and for any local-dev environment without git
+// installed; it lets the same binary work in all four
+// combinations of {debug, production} × {git-on-PATH, git-off-PATH}
+// without forcing the production image to grow.
 //
 // All functions take a workdir and run the git command scoped
 // to that directory via `git -C <workdir>` — no need for
@@ -52,9 +57,11 @@ var errBranchUnknown = errors.New("git: could not determine current branch")
 // or workdir has no commits yet).
 //
 // Error return values:
-//   - ErrNoGit:    `git` is not on PATH (the distroless CI
-//     image; the caller should debug-log and
-//     move on — see package doc).
+//   - ErrNoGit:    `git` is not on PATH. In the debug
+//     Docker image (the one the example CI template uses)
+//     this should be unreachable; in the production image
+//     (:latest) it is the expected runtime state. The caller
+//     should debug-log and move on — see package doc.
 //   - ErrNotARepo: workdir is not a git repo; not an error
 //     in the reviewer's view.
 //   - errBranchUnknown (wrapped): any other failure (e.g.

@@ -17,6 +17,62 @@
 # Dockerfile for the version pin rationale and the MCP contract
 # that the pin enforces. The CLI shape is `tokensave serve --path <path>`;
 # tokensave's older `mcp --project-root` shape is no longer used.
+#
+# ─── Git bundle (debug image only) ─────────────────────────────
+# The debug image bundles `git` so the orchestrator's branch
+# sanity check (internal/reviewer/orchestrator.go) actually fires
+# in CI. The production image (:latest) deliberately stays
+# minimal — operators who use it have already opted into
+# "no shell, no extra binaries" and the silent debug-log
+# degradation is the correct trade-off for that surface.
+#
+# Why we need git in the debug image at all: the orchestrator
+# fetches the MR's source branch from GitLab, then `git -C
+# <workdir> rev-parse --abbrev-ref HEAD` to confirm the workdir
+# is checked out on that branch. A mismatch makes tokensave
+# index the wrong tree, and the agent's tokensave_* calls
+# return data from a different revision than the diff. The
+# helper (internal/git/branch.go) returns ErrNoGit when git is
+# missing; the debug image's bundle turns that path into a real
+# loud WARN at runtime instead of a silent debug log. Local dev
+# (where git is on PATH) keeps the same loud WARN regardless.
+#
+# Vendor strategy: install `git` from debian:bookworm-slim's
+# apt repo, copy the binary + its 2 non-libc direct deps
+# (libpcre2-8, libz) into a self-contained /out tree, then
+# `patchelf --set-rpath '$ORIGIN/../lib'` on the binary so the
+# dynamic linker finds the vendored libs at /usr/local/lib in
+# the final image. We use `ldd` rather than a hard-coded
+# per-arch path list so the same Dockerfile works for both
+# linux/amd64 and linux/arm64 — the sonames are stable; the
+# absolute /lib/<arch>-linux-gnu/ paths differ per arch.
+#
+# We do NOT execute git in the builder stage other than the
+# self-test at the end of the RUN; the actual exec happens in
+# the runtime image, where the rpath is what makes the binary
+# find its vendored libs.
+#
+# Why a debian builder (not alpine): alpine's git is
+# dynamically linked against musl, and the distroless runtime
+# uses glibc. Copying the musl-linked binary into a glibc
+# runtime fails exec with "ld-linux-x86-64.so.1: cannot open
+# shared object file" or similar. Building a static git from
+# source in alpine would also work (and is the pattern
+# tokensave uses, but tokensave is a single self-contained
+# Rust binary; git's source build pulls in libpcre2, libz,
+# libcurl, openssl, perl, etc. — building all of that static
+# from source is a 5+min per-arch build for a 2-package
+# alternative).
+#
+# Version pin: `1:2.39.5-0+deb12u3` (git 2.39.5) in
+# debian:bookworm-20240926-slim. The image tag is date-pinned
+# so the apt indices are reproducible; the package version is
+# pinned so the same git binary is installed on every build
+# even if the upstream bookworm repo rolls forward. Fail-closed:
+# if either the image tag disappears or the package version is
+# pulled, `apt-get install` errors out at build time. The
+# git-smoke CI job (scripts/git-smoke.sh) verifies the
+# upstream repo still serves the pin before a release.
 
 # Stage 1: download + verify + unpack the pinned tokensave release.
 #
@@ -67,12 +123,59 @@ RUN apk add --no-cache curl \
 # and the second FROM reuses the cache.
 FROM gcr.io/distroless/cc:debug-nonroot AS busybox-source
 
+# Stage 1.6: install git from a pinned debian package and vendor
+# the binary + its 2 non-libc direct deps into /out. See the file
+# header for the full design rationale; this stage exists because
+# the orchestrator's branch sanity check needs a real `git` to
+# fire in CI rather than degrade to a debug log.
+#
+# `patchelf --set-rpath '$ORIGIN/../lib'` embeds the rpath in the
+# binary so the dynamic linker finds the vendored libs at
+# /usr/local/lib in the final image (the binary is placed at
+# /usr/local/bin/git; $ORIGIN is /usr/local/bin, so
+# $ORIGIN/../lib is /usr/local/lib). No LD_LIBRARY_PATH needed.
+#
+# `ldd` is used to discover git's direct library deps rather
+# than a hard-coded per-arch path list, so the same Dockerfile
+# works for both linux/amd64 and linux/arm64. We skip
+# `libc.so.6` (already in the distroless cc runtime) and the
+# linux-vdso / ld-linux dynamic linker entries (the kernel
+# provides those).
+FROM debian:bookworm-20240926-slim AS git
+ARG GIT_DEB_VERSION=1:2.39.5-0+deb12u3
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+        git="${GIT_DEB_VERSION}" \
+        patchelf \
+        ca-certificates; \
+    rm -rf /var/lib/apt/lists/*; \
+    mkdir -p /out/bin /out/lib; \
+    cp /usr/bin/git /out/bin/git; \
+    ldd /out/bin/git \
+      | awk '/=>/ {print $3}' \
+      | grep -E '\.so' \
+      | grep -v 'libc\.so' \
+      | xargs -r -I {} cp {} /out/lib/; \
+    patchelf --set-rpath '$ORIGIN/../lib' /out/bin/git; \
+    # Self-test: actually run the vendored binary. If the rpath
+    # is wrong or a lib is missing, this fails here rather than
+    # at consumer runtime.
+    /out/bin/git --version; \
+    test -x /out/bin/git
+
 # Stage 2: distroless debug runtime (busybox shell + glibc + libgcc).
 FROM gcr.io/distroless/cc:debug-nonroot AS runtime
 
 ARG TARGETPLATFORM
 COPY --chown=65532:65532 ${TARGETPLATFORM}/mreview /mreview
 COPY --from=tokensave --chown=65532:65532 /out/tokensave /usr/local/bin/tokensave
+# Bundled git so the orchestrator's branch sanity check fires
+# in CI. See the file header for the design; the rpath on the
+# binary (set by the `git` stage) finds these libs without
+# needing LD_LIBRARY_PATH.
+COPY --from=git --chown=65532:65532 /out/bin/git /usr/local/bin/git
+COPY --from=git --chown=65532:65532 /out/lib/ /usr/local/lib/
 
 # /bin/sh is required by GitLab Runner (and other CI runners) to
 # invoke script: blocks. distroless cc:debug-nonroot ships busybox

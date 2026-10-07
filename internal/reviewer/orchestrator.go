@@ -322,12 +322,14 @@ func (o *Orchestrator) Run(ctx context.Context, project any, iid int, action ...
 	// invoking mreview, so the mismatch is rare but possible
 	// (e.g. when reused workdirs from earlier runs survive).
 	//
-	// The check shells out to `git`. The distroless image does
-	// NOT bundle a git binary, so the helper returns
-	// ErrNoGit and we degrade silently to a debug-log; this
-	// matches the build's "no extra binaries in the runtime
-	// image" stance. Local dev (where git is on PATH) gets
-	// the loud WARN that's actually useful.
+	// The check shells out to `git`. The debug Docker image
+	// (cmd/mreview/Dockerfile.debug) bundles git at
+	// /usr/local/bin/git — the example GitLab CI template
+	// (examples/gitlab-ci.yml) uses :latest-debug, so this
+	// WARN fires for real in CI. The production image
+	// (:latest) does NOT bundle git and degrades silently
+	// to a debug log via the ErrNoGit path below; local dev
+	// (where git is on PATH) always gets the loud WARN.
 	//
 	// We intentionally DO NOT auto-checkout. Run-time git
 	// mutation from a code-review CLI is surprising, can
@@ -338,7 +340,7 @@ func (o *Orchestrator) Run(ctx context.Context, project any, iid int, action ...
 		wcur, werr := git.CurrentBranch(o.cfg.WorkDir)
 		switch {
 		case errors.Is(werr, git.ErrNoGit):
-			logger.Debug("skipping branch check: git not on PATH (CI / distroless)")
+			logger.Debug("skipping branch check: git not on PATH (production :latest image, or a non-debug local dev)")
 		case errors.Is(werr, git.ErrNotARepo):
 			logger.Debug("skipping branch check: workdir is not a git repository",
 				"workdir", o.cfg.WorkDir,
