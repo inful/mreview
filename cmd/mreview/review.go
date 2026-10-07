@@ -27,7 +27,13 @@ type ReviewCmd struct {
 	MR   int    `required:"" name:"mr" help:"Merge request IID."`
 
 	// GitLab connection.
-	GitLabURL   string `default:"https://gitlab.com" name:"gitlab-url" env:"GITLAB_URL" help:"GitLab base URL."`
+	// GitLabURL is the GitLab API root URL. Either the full
+	// API root (e.g. "https://gitlab.com/api/v4" or
+	// "$CI_API_V4_URL") or the web-UI base URL
+	// (e.g. "https://gitlab.com" or "$CI_SERVER_URL") is
+	// accepted; the latter is auto-normalised to append
+	// "/api/v4" by internal/gitlab.NewClient.
+	GitLabURL   string `default:"https://gitlab.com/api/v4" name:"gitlab-url" env:"GITLAB_URL" help:"GitLab API root URL. Either the full API root (e.g. https://gitlab.com/api/v4) or the web-UI base (e.g. https://gitlab.com) is accepted; /api/v4 is auto-appended if missing."`
 	GitLabToken string `required:"" env:"GITLAB_TOKEN" name:"gitlab-token" help:"GitLab Personal Access Token (api scope)."`
 
 	// Provider selection (issue #42, migration step 3).
