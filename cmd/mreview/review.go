@@ -126,7 +126,20 @@ type ReviewCmd struct {
 	NoDedup bool `name:"no-dedup" env:"MREVIEW_NO_DEDUP" help:"Disable same-commit-skip dedup; force a fresh review every run. Default false."`
 
 	// Per-event branching (issue #41 / migration step 1 of #42).
-	OnDrafts string `default:"skip" name:"on-drafts" enum:"run,skip" env:"MREVIEW_ON_DRAFTS" help:"Action on draft MRs (CI_MERGE_REQUEST_DRAFT=true): run the review or skip with exit 0. Default skip."`
+	//
+	// OnDrafts default is "run" (changed from "skip" in v0.9.3).
+	// The previous default silently skipped review for draft
+	// MRs, which produced an operational gap: a developer
+	// could move an MR from draft to ready without GitLab
+	// firing a new pipeline (the "Mark as ready" event is
+	// not a default pipeline trigger), so the per-event
+	// guard never got a chance to flip Proceed=true. With
+	// the new default, every MR pipeline — including those
+	// that fire while the MR is still a draft — runs the
+	// review. Operators who want the old skip-on-draft
+	// behaviour can set MREVIEW_ON_DRAFTS=skip or
+	// --on-drafts=skip explicitly.
+	OnDrafts string `default:"run" name:"on-drafts" enum:"run,skip" env:"MREVIEW_ON_DRAFTS" help:"Action on draft MRs (CI_MERGE_REQUEST_DRAFT=true): run the review or skip with exit 0. Default run."`
 	OnPush   string `default:"skip" name:"on-push" enum:"run,skip" env:"MREVIEW_ON_PUSH" help:"Action on direct branch pushes (CI_PIPELINE_SOURCE=push): run the review or skip with exit 0. Default skip."`
 
 	// PolicyFile points at a YAML file with the policy schema

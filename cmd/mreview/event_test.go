@@ -75,9 +75,13 @@ func TestRun_Review_UnsupportedSource_ExitsZero(t *testing.T) {
 }
 
 // TestRun_Review_DraftMR_ExitsZero sets up an MR-event run with
-// CI_MERGE_REQUEST_DRAFT=true and verifies the guard skips with
-// exit 0. The default --on-drafts is "skip"; this test pins that
-// default.
+// CI_MERGE_REQUEST_DRAFT=true and --on-drafts=skip (set
+// explicitly) to verify the guard still skips with exit 0 when
+// the operator chooses to opt out of draft reviews.
+//
+// Since v0.9.3 the default is --on-drafts=run; this test pins
+// the explicit-skip path. The new default is covered by
+// TestRun_Review_DraftMR_DefaultProceeds below.
 func TestRun_Review_DraftMR_ExitsZero(t *testing.T) {
 	t.Setenv("CI_PIPELINE_SOURCE", "merge_request_event")
 	t.Setenv("CI_MERGE_REQUEST_IID", "42")
@@ -91,13 +95,14 @@ func TestRun_Review_DraftMR_ExitsZero(t *testing.T) {
 			"--repo=foo/bar",
 			"--mr=42",
 			"--gitlab-token=test",
+			"--on-drafts=skip", // explicit opt-out; default is "run" since v0.9.3
 			"--verbose",
 			"--log-format=json",
 		},
 		stdout, stderr,
 	)
 	if code != 0 {
-		t.Errorf("draft MR with default --on-drafts=skip should exit 0; got %d\nstderr: %s",
+		t.Errorf("draft MR with --on-drafts=skip should exit 0; got %d\nstderr: %s",
 			code, stderr.String())
 	}
 	if !strings.Contains(stderr.String(), "skipping review per per-event guard") {
@@ -105,6 +110,55 @@ func TestRun_Review_DraftMR_ExitsZero(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "draft MR") {
 		t.Errorf("expected skip reason to mention draft MR, got: %s", stderr.String())
+	}
+}
+
+// TestRun_Review_DraftMR_DefaultProceeds pins the v0.9.3 default:
+// a draft MR with no --on-drafts override should NOT skip —
+// the review proceeds to the orchestrator. The downstream
+// GitLab call fails auth (test token); the important assertion
+// is that the skip line is absent and "starting review" fires.
+//
+// Why the default changed: GitLab does not fire a new pipeline
+// on the "Mark as ready" event, so the per-event guard never
+// gets a chance to flip Proceed=true after a developer marks
+// an MR ready. Running the review while the MR is still a
+// draft closes that gap.
+func TestRun_Review_DraftMR_DefaultProceeds(t *testing.T) {
+	t.Setenv("CI_PIPELINE_SOURCE", "merge_request_event")
+	t.Setenv("CI_MERGE_REQUEST_IID", "42")
+	t.Setenv("CI_MERGE_REQUEST_DRAFT", "true")
+
+	stdout := &bytes.Buffer{}
+	stderr := &bytes.Buffer{}
+	// No --on-drafts flag. Default is "run" since v0.9.3.
+	// --workdir is set so the runReview workdir check doesn't
+	// fire first; we want to reach the orchestrator stage so
+	// the "starting review" log line is emitted.
+	code := run(context.Background(),
+		[]string{
+			"review",
+			"--repo=foo/bar",
+			"--mr=42",
+			"--gitlab-token=test",
+			"--workdir=" + t.TempDir(),
+			"--log-format=json",
+		},
+		stdout, stderr,
+	)
+	// Auth-401 from the real GitLab (test token rejected) is
+	// the expected exit code. The point is the guard let the
+	// review through — we verify that via the log lines, not
+	// the exit code (which depends on network).
+	if code == 0 {
+		t.Errorf("review should reach the orchestrator (auth-fail expected), got exit 0\nstderr: %s",
+			stderr.String())
+	}
+	if strings.Contains(stderr.String(), "skipping review per per-event guard") {
+		t.Errorf("default --on-drafts should be 'run' (no skip); got skip line: %s", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "starting review") {
+		t.Errorf("expected 'starting review' log line; guard should have let the call through: %s", stderr.String())
 	}
 }
 
