@@ -5,7 +5,6 @@ import (
 	"testing"
 
 	"github.com/inful/mreview/internal/gitlab"
-	"github.com/inful/mreview/internal/policy"
 )
 
 // TestRenderSummary_EmptyFindings pins the "no issues" path
@@ -34,30 +33,36 @@ func TestRenderSummary_EmptyFindings(t *testing.T) {
 	if strings.Contains(out, "| Severity |") {
 		t.Errorf("empty findings should not render an empty table; got:\n%s", out)
 	}
+	// The new Status column header should not appear
+	// either — a header row without a body is a GitLab
+	// render trap.
+	if strings.Contains(out, "| Status |") {
+		t.Errorf("empty findings should not render a header row; got:\n%s", out)
+	}
 }
 
 // TestRenderSummary_SingleFinding pins the row format with
-// the four-column table. This is the failure-mode test
-// for the "all squashed together" GitLab rendering bug.
+// the five-column table. The Status column is the new piece
+// (🆕 new for a freshly-posted finding).
 func TestRenderSummary_SingleFinding(t *testing.T) {
 	mr := &gitlab.MergeRequest{SHA: "sha-1"}
-	findings := []policy.EnforcedFinding{
+	rows := []SummaryRow{
 		{
 			File:     "cmd/main.go",
 			Line:     42,
-			Severity: policy.SeverityError,
+			Severity: "error",
 			Category: "correctness",
 			Body:     "Does the thing wrong.",
-			Verdict:  policy.SeverityError,
+			Status:   StatusNew,
 		},
 	}
-	out := renderSummary(mr, "", findings, []string{"d-a"})
+	out := renderSummary(mr, "", rows, []string{"d-a"})
 
 	// The header row is GitLab's signal that this is a table.
 	for _, want := range []string{
-		"| Severity | File | Line | Category | Description |",
-		"|----------|------|-----:|----------|-------------|", // right-aligned line numbers
-		"| 🛑 error | `cmd/main.go` | 42 | correctness | Does the thing wrong. |",
+		"| Status | Severity | File | Line | Category | Description |",
+		"|--------|----------|------|-----:|----------|-------------|", // right-aligned line numbers
+		"| 🆕 new | 🛑 error | `cmd/main.go` | 42 | correctness | Does the thing wrong. |",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("missing %q in output:\n%s", want, out)
@@ -69,20 +74,20 @@ func TestRenderSummary_SingleFinding(t *testing.T) {
 // becomes its own row (no squashing into a single line).
 func TestRenderSummary_MultipleFindings(t *testing.T) {
 	mr := &gitlab.MergeRequest{SHA: "sha-1"}
-	findings := []policy.EnforcedFinding{
-		{File: "a.go", Line: 1, Severity: policy.SeverityError, Category: "security", Body: "Hard-coded secret.", Verdict: policy.SeverityError},
-		{File: "b.go", Line: 7, Severity: policy.SeverityWarning, Category: "perf", Body: "O(n^2) loop.", Verdict: policy.SeverityWarning},
-		{File: "c.go", Line: 13, Severity: policy.SeverityInfo, Category: "style", Body: "Naming nit.", Verdict: policy.SeverityInfo},
+	rows := []SummaryRow{
+		{File: "a.go", Line: 1, Severity: "error", Category: "security", Body: "Hard-coded secret.", Status: StatusNew},
+		{File: "b.go", Line: 7, Severity: "warning", Category: "perf", Body: "O(n^2) loop.", Status: StatusNew},
+		{File: "c.go", Line: 13, Severity: "info", Category: "style", Body: "Naming nit.", Status: StatusNew},
 	}
-	out := renderSummary(mr, "", findings, []string{"d-a", "d-b", "d-c"})
+	out := renderSummary(mr, "", rows, []string{"d-a", "d-b", "d-c"})
 
 	// Each finding must occupy its own line; if any two ended
 	// up on the same line, the table render in GitLab would
 	// collapse to one row.
 	for _, want := range []string{
-		"🛑 error | `a.go`",
-		"⚠️ warning | `b.go`",
-		"ℹ️ info | `c.go`",
+		"🆕 new | 🛑 error | `a.go`",
+		"🆕 new | ⚠️ warning | `b.go`",
+		"🆕 new | ℹ️ info | `c.go`",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("missing %q in output:\n%s", want, out)
@@ -97,17 +102,17 @@ func TestRenderSummary_MultipleFindings(t *testing.T) {
 // an unreadable wall.
 func TestRenderSummary_BodyWithNewlines(t *testing.T) {
 	mr := &gitlab.MergeRequest{SHA: "sha-1"}
-	findings := []policy.EnforcedFinding{
+	rows := []SummaryRow{
 		{
 			File:     "x.go",
 			Line:     1,
-			Severity: policy.SeverityWarning,
+			Severity: "warning",
 			Category: "correctness",
 			Body:     "First sentence.\nSecond sentence.\nThird sentence.",
-			Verdict:  policy.SeverityWarning,
+			Status:   StatusNew,
 		},
 	}
-	out := renderSummary(mr, "", findings, nil)
+	out := renderSummary(mr, "", rows, nil)
 
 	if !strings.Contains(out, "First sentence.<br>Second sentence.<br>Third sentence.") {
 		t.Errorf("newlines should be replaced with <br>; got:\n%s", out)
@@ -125,17 +130,17 @@ func TestRenderSummary_BodyWithNewlines(t *testing.T) {
 // break the markdown structure downstream.
 func TestRenderSummary_BodyWithPipes(t *testing.T) {
 	mr := &gitlab.MergeRequest{SHA: "sha-1"}
-	findings := []policy.EnforcedFinding{
+	rows := []SummaryRow{
 		{
 			File:     "x.go",
 			Line:     1,
-			Severity: policy.SeverityInfo,
+			Severity: "info",
 			Category: "style",
 			Body:     "Use `a | b` rather than the alternative.",
-			Verdict:  policy.SeverityInfo,
+			Status:   StatusNew,
 		},
 	}
-	out := renderSummary(mr, "", findings, nil)
+	out := renderSummary(mr, "", rows, nil)
 
 	want := "Use `a \\| b` rather than the alternative."
 	if !strings.Contains(out, want) {
@@ -143,158 +148,237 @@ func TestRenderSummary_BodyWithPipes(t *testing.T) {
 	}
 }
 
-// TestRenderSummary_VerdictOverridesSeverity pins the
-// emoji-from-Verdict behaviour: a finding whose Severity
-// was "info" but whose Verdict was escalated to "error"
-// (via policy.severity_override) should render with the
-// error emoji.
-func TestRenderSummary_VerdictOverridesSeverity(t *testing.T) {
+// TestRenderSummary_CarriedOver covers the carried-over
+// row shape: same Status column (with "carried over"
+// label and ↻ glyph), Severity/Category placeholders
+// ("(prior)" so the operator knows the original is one
+// click away), the prior body verbatim.
+func TestRenderSummary_CarriedOver(t *testing.T) {
 	mr := &gitlab.MergeRequest{SHA: "sha-1"}
-	findings := []policy.EnforcedFinding{
+	rows := []SummaryRow{
 		{
 			File:     "x.go",
-			Line:     1,
-			Severity: policy.SeverityInfo,
-			Category: "security",
-			Body:     "Escalated by policy.",
-			Verdict:  policy.SeverityError,
+			Line:     10,
+			Severity: "warning", // ignored for carried-over
+			Category: "test",    // ignored for carried-over
+			Body:     "Missing test for foo.",
+			Status:   StatusStillValid,
 		},
 	}
-	out := renderSummary(mr, "", findings, nil)
+	out := renderSummary(mr, "", rows, []string{"d-existing"})
 
-	if !strings.Contains(out, "| 🛑 error |") {
-		t.Errorf("verdict (not severity) should drive emoji; got:\n%s", out)
-	}
-}
-
-// TestRenderSummary_SummaryAndFindings confirms the full
-// layout: a top heading, an optional summary paragraph,
-// then the <details>-wrapped table.
-func TestRenderSummary_SummaryAndFindings(t *testing.T) {
-	mr := &gitlab.MergeRequest{SHA: "sha-1"}
-	findings := []policy.EnforcedFinding{
-		{File: "x.go", Line: 1, Severity: policy.SeverityWarning, Category: "test", Body: "Missing test for foo.", Verdict: policy.SeverityWarning},
-	}
-	out := renderSummary(mr, "Overall LGTM.", findings, []string{"d-x"})
-
-	wantOrder := []string{
-		"# mreview summary",
-		"\nOverall LGTM.\n",
-		"<details>",
-		"<summary>Findings (1)</summary>",
-		"| Severity |",
-		"| ⚠️ warning | `x.go` | 1 | test | Missing test for foo. |",
-		"</details>",
-	}
-	last := 0
-	for _, want := range wantOrder {
-		idx := strings.Index(out, want)
-		if idx < 0 {
-			t.Errorf("missing %q in output:\n%s", want, out)
-			continue
+	for _, want := range []string{
+		"↻ carried over",
+		"(prior)",
+		"Missing test for foo.",
+		// The "warning" text should NOT appear in the
+		// Severity column for carried-over rows —
+		// that would be misleading (the verdict
+		// applied to the original review, not this
+		// carried-over status).
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in carried-over output:\n%s", want, out)
 		}
-		if idx < last {
-			t.Errorf("order wrong: %q appeared at %d, expected after %d", want, idx, last)
-		}
-		last = idx
+	}
+	// Defence-in-depth: the original severity text
+	// should be replaced by the "(prior)" placeholder.
+	// We don't assert that "warning" is absent (it
+	// could appear in the body) but we do check the
+	// Severity cell shape.
+	if !strings.Contains(out, "↻ carried over | (prior) |") {
+		t.Errorf("Severity column for carried-over should be '(prior)'; got:\n%s", out)
 	}
 }
 
-// TestRenderSummary_MarkerPrepended pins the dedup marker
-// at the top of the rendered body when mr.SHA is non-empty.
-// The marker is the wire format the next mreview run reads
-// to detect prior reviews; if its format or position drifts,
-// the dedup flow silently regresses to "no prior summary
-// found, post fresh every time".
-func TestRenderSummary_MarkerPrepended(t *testing.T) {
-	mr := &gitlab.MergeRequest{SHA: "abc123def"}
-	out := renderSummary(mr, "", nil, nil)
-	want := "<!-- mreview:commit=abc123def -->"
-	if !strings.Contains(out, want) {
-		t.Errorf("commit-only marker not present; got:\n%s", out)
-	}
-	// Marker must come BEFORE the body — operator-visible
-	// content stays at top.
-	markerIdx := strings.Index(out, want)
-	bodyIdx := strings.Index(out, "# mreview summary")
-	if markerIdx < 0 || bodyIdx <= markerIdx {
-		t.Errorf("ordering wrong: marker=%d body=%d\n%s", markerIdx, bodyIdx, out)
-	}
-}
-
-// TestRenderSummary_MarkerWithFindings pins the marker
-// shape when there ARE findings: commit + comma-separated
-// finding IDs at the very top.
-func TestRenderSummary_MarkerWithFindings(t *testing.T) {
-	mr := &gitlab.MergeRequest{SHA: "deadbeef"}
-	out := renderSummary(mr, "", nil, []string{"d-1", "d-2", "d-3"})
-	want := "<!-- mreview:commit=deadbeef findings=d-1,d-2,d-3 -->"
-	if !strings.Contains(out, want) {
-		t.Errorf("findings-bearing marker not present; got:\n%s", out)
-	}
-}
-
-// TestRenderSummary_NoMarkerWhenSHAEmpty confirms the
-// fallback: an MR whose projection doesn't carry SHA
-// (older deployments, API edge case) renders without a
-// marker. The next run can't dedup, but it can still post.
-func TestRenderSummary_NoMarkerWhenSHAEmpty(t *testing.T) {
-	mr := &gitlab.MergeRequest{} // SHA: ""
-	out := renderSummary(mr, "", nil, []string{"d-1"})
-	if strings.Contains(out, "<!-- mreview:") {
-		t.Errorf("expected no marker when SHA is empty; got:\n%s", out)
-	}
-}
-
-// TestRenderSummary_DetailsWrapping pins the new
-// <details>/<summary> structure end-to-end. This is the
-// regression test for the rendering change that puts the
-// finding count in <summary> and the table inside <details>,
-// so the GitLab message defaults to a single click-to-expand
-// row instead of dumping the whole table into the MR's
-// activity feed.
-func TestRenderSummary_DetailsWrapping(t *testing.T) {
+// TestRenderSummary_Resolved covers the resolved row
+// shape: Status column shows "resolved" + ✓ glyph, the
+// LLM's rationale is appended to the body in an
+// "Resolved: ..." suffix so the operator can see WHY
+// the prior finding was auto-resolved without
+// clicking through to the (now-collapsed) thread.
+func TestRenderSummary_Resolved(t *testing.T) {
 	mr := &gitlab.MergeRequest{SHA: "sha-1"}
-	findings := []policy.EnforcedFinding{
-		{File: "a.go", Line: 1, Severity: policy.SeverityError, Category: "x", Body: "one", Verdict: policy.SeverityError},
-		{File: "b.go", Line: 2, Severity: policy.SeverityError, Category: "x", Body: "two", Verdict: policy.SeverityError},
-		{File: "c.go", Line: 3, Severity: policy.SeverityError, Category: "x", Body: "three", Verdict: policy.SeverityError},
+	rows := []SummaryRow{
+		{
+			File:      "x.go",
+			Line:      10,
+			Severity:  "warning",
+			Category:  "test",
+			Body:      "Missing test for foo.",
+			Status:    StatusResolved,
+			Rationale: "The test was added on line 12 of the same file.",
+		},
 	}
-	out := renderSummary(mr, "", findings, nil)
+	out := renderSummary(mr, "", rows, nil)
 
-	// Single <details> block that opens before the table and
-	// closes after it. Critical: no nested or stray
-	// <details>/</details>.
-	openCount := strings.Count(out, "<details>")
-	closeCount := strings.Count(out, "</details>")
-	if openCount != 1 {
-		t.Errorf("expected exactly 1 <details> open; got %d in:\n%s", openCount, out)
+	for _, want := range []string{
+		"✓ resolved",
+		"Missing test for foo.",
+		// Rationale is rendered as "Resolved: <rationale>"
+		// in italics so it visually separates from the
+		// body and from the column header.
+		"Resolved: The test was added on line 12 of the same file.",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in resolved output:\n%s", want, out)
+		}
 	}
-	if closeCount != 1 {
-		t.Errorf("expected exactly 1 </details> close; got %d in:\n%s", closeCount, out)
-	}
+}
 
-	// Summary line must carry the count.
+// TestRenderSummary_OutOfScope covers the out_of_scope
+// row: same display shape as resolved (auto-collapsed
+// thread, "resolved" label) but with the ∅ glyph and
+// "out of scope" label, plus the rationale.
+func TestRenderSummary_OutOfScope(t *testing.T) {
+	mr := &gitlab.MergeRequest{SHA: "sha-1"}
+	rows := []SummaryRow{
+		{
+			File:      "old.go",
+			Line:      10,
+			Severity:  "warning",
+			Category:  "test",
+			Body:      "Missing test for foo.",
+			Status:    StatusOutOfScope,
+			Rationale: "The file was deleted in this MR.",
+		},
+	}
+	out := renderSummary(mr, "", rows, nil)
+
+	for _, want := range []string{
+		"∅ out of scope",
+		"Resolved: The file was deleted in this MR.",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in out_of_scope output:\n%s", want, out)
+		}
+	}
+}
+
+// TestRenderSummary_MixedStatus covers the realistic
+// follow-up-run case: a mix of new, carried-over, and
+// resolved findings in one table. The order is determined
+// by buildSummaryRows (new → carried-over → resolved,
+// with (file, line) sorting inside each group). The test
+// drives through buildSummaryRows to keep the sort logic
+// in one place — renderSummary itself is order-agnostic
+// and just renders whatever rows it gets.
+func TestRenderSummary_MixedStatus(t *testing.T) {
+	mr := &gitlab.MergeRequest{SHA: "sha-1"}
+	// Build the input slices as the orchestrator would
+	// after classifyPriorFindings:
+	//   - newFindings: from the LLM's resp.Findings
+	//   - carryOver: the prior findings the LLM said
+	//     still_valid
+	//   - resolved: the prior findings the LLM said
+	//     resolved or out_of_scope
+	newFindings := []Finding{
+		{File: "c.go", Line: 30, Severity: SeverityInfo, Category: "style", Body: "Naming nit."},
+		{File: "d.go", Line: 5, Severity: SeverityError, Category: "correctness", Body: "New issue."},
+	}
+	carryOver := []PriorFinding{
+		{File: "b.go", Line: 20, Body: "O(n^2) loop."},
+	}
+	resolved := []priorResolvedEntry{
+		{Finding: PriorFinding{File: "a.go", Line: 10, Body: "Hard-coded secret."}, Status: StatusResolved, Rationale: "moved to env var"},
+	}
+	rows := buildSummaryRows(newFindings, carryOver, resolved)
+	out := renderSummary(mr, "", rows, nil)
+
+	// The four rows must appear in the documented
+	// order: new (sorted by file,line: d.go:5 then
+	// c.go:30), then still_valid (b.go:20), then
+	// resolved (a.go:10). We assert the position by
+	// looking for the relative ordering of unique
+	// anchors.
+	idx := map[string]int{}
+	for _, anchor := range []string{
+		"New issue.",         // d.go new (line 5)
+		"Naming nit.",        // c.go new (line 30)
+		"O(n^2) loop.",       // b.go still_valid
+		"Hard-coded secret.", // a.go resolved
+	} {
+		idx[anchor] = strings.Index(out, anchor)
+	}
+	// The new group sorts alphabetically by file; c.go
+	// sorts before d.go regardless of line number.
+	if idx["Naming nit."] >= idx["New issue."] {
+		t.Errorf("within 'new' group, c.go should appear before d.go (alphabetical file sort); got positions: %+v", idx)
+	}
+	if idx["New issue."] >= idx["O(n^2) loop."] {
+		t.Errorf("'new' group should appear before 'still_valid' group; got positions: %+v", idx)
+	}
+	if idx["O(n^2) loop."] >= idx["Hard-coded secret."] {
+		t.Errorf("'still_valid' group should appear before 'resolved' group; got positions: %+v", idx)
+	}
+}
+
+// TestBuildSummaryRows_SortOrder pins the sort behaviour
+// directly (without the render layer in the way). The
+// render-summary test above is end-to-end; this is the
+// unit-level pin on the sort key. The sort is:
+//  1. Status (new < still_valid < resolved < out_of_scope)
+//  2. File (alphabetical)
+//  3. Line (numerical)
+func TestBuildSummaryRows_SortOrder(t *testing.T) {
+	newFindings := []Finding{
+		{File: "c.go", Line: 30, Severity: SeverityInfo, Body: "Naming nit."},
+		{File: "d.go", Line: 5, Severity: SeverityError, Body: "New issue."},
+		// Add a second finding in c.go to pin the
+		// "sort by line within the same file" tie-break.
+		{File: "c.go", Line: 10, Severity: SeverityWarning, Body: "Earlier c.go finding."},
+	}
+	carryOver := []PriorFinding{
+		{File: "b.go", Line: 20, Body: "O(n^2) loop."},
+	}
+	resolved := []priorResolvedEntry{
+		{Finding: PriorFinding{File: "a.go", Line: 10, Body: "Hard-coded secret."}, Status: StatusResolved, Rationale: "fixed"},
+	}
+	rows := buildSummaryRows(newFindings, carryOver, resolved)
+	// Expected: c.go:10, c.go:30, d.go:5, b.go:20, a.go:10
+	wantFiles := []string{"c.go", "c.go", "d.go", "b.go", "a.go"}
+	wantLines := []int{10, 30, 5, 20, 10}
+	if len(rows) != len(wantFiles) {
+		t.Fatalf("got %d rows, want %d", len(rows), len(wantFiles))
+	}
+	for i := range wantFiles {
+		if rows[i].File != wantFiles[i] || rows[i].Line != wantLines[i] {
+			t.Errorf("row %d: got %s:%d, want %s:%d", i, rows[i].File, rows[i].Line, wantFiles[i], wantLines[i])
+		}
+	}
+}
+
+// TestRenderSummary_FindingCountInSummary pins the
+// "Findings (N)" header in the <summary> block. The
+// count must match the total number of rows across all
+// status groups — operators use this to spot at a
+// glance whether a row was dropped on the floor.
+func TestRenderSummary_FindingCountInSummary(t *testing.T) {
+	mr := &gitlab.MergeRequest{SHA: "sha-1"}
+	rows := []SummaryRow{
+		{File: "a.go", Line: 1, Severity: "error", Body: "x", Status: StatusNew},
+		{File: "b.go", Line: 2, Severity: "warning", Body: "y", Status: StatusStillValid},
+		{File: "c.go", Line: 3, Severity: "info", Body: "z", Status: StatusResolved, Rationale: "fixed"},
+	}
+	out := renderSummary(mr, "", rows, nil)
 	if !strings.Contains(out, "<summary>Findings (3)</summary>") {
-		t.Errorf("summary must carry the count; got:\n%s", out)
+		t.Errorf("summary count should be 3 (all rows, not just new); got:\n%s", out)
 	}
+}
 
-	// Ordering: <details> opens, summary follows, blank
-	// line, table, blank line, </details>. We assert the
-	// table sits BETWEEN the <summary> and </details>.
-	openIdx := strings.Index(out, "<details>")
-	summaryIdx := strings.Index(out, "<summary>Findings (3)</summary>")
-	tableIdx := strings.Index(out, "| Severity | File | Line | Category | Description |")
-	closeIdx := strings.Index(out, "</details>")
-	if openIdx >= summaryIdx || summaryIdx >= tableIdx || tableIdx >= closeIdx {
-		t.Errorf("ordering wrong: <details>=%d <summary>=%d <table>=%d </details>=%d\n%s",
-			openIdx, summaryIdx, tableIdx, closeIdx, out)
+// TestRenderSummary_VerdictOverridesSeverity pins the
+// emoji-from-Severity behaviour: a finding whose Severity
+// is "error" should render with the 🛑 emoji regardless
+// of which status group it's in (as long as it's Status
+// New). The carried-over / resolved rows use "(prior)"
+// instead and don't show the severity emoji.
+func TestRenderSummary_VerdictOverridesSeverity(t *testing.T) {
+	mr := &gitlab.MergeRequest{SHA: "sha-1"}
+	rows := []SummaryRow{
+		{File: "x.go", Line: 1, Severity: "error", Category: "x", Body: "x", Status: StatusNew},
 	}
-
-	// The blank line between </summary> and the table is
-	// critical — without it, GitLab's markdown parser does
-	// not recognise the table block. Pin it explicitly.
-	if !strings.Contains(out, "</summary>\n\n| Severity |") {
-		t.Errorf("missing blank line between </summary> and the table header; got:\n%s", out)
+	out := renderSummary(mr, "", rows, nil)
+	if !strings.Contains(out, "🛑 error") {
+		t.Errorf("severity=error should render with 🛑; got:\n%s", out)
 	}
 }

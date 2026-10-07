@@ -90,6 +90,78 @@ func TestParseReviewResponse_InvalidJSON(t *testing.T) {
 	}
 }
 
+// TestParseReviewResponse_WithPriorFindings covers the
+// new `prior_findings` field: the LLM echoes the input
+// priors back with a status. The parser must populate
+// resp.PriorFindings even when the input omits
+// `findings` (older models / first run).
+func TestParseReviewResponse_WithPriorFindings(t *testing.T) {
+	raw := `{
+		"findings": [{"file": "a.go", "line": 5, "severity": "warning", "category": "test", "body": "new issue"}],
+		"prior_findings": [
+			{"file": "b.go", "line": 20, "status": "still_valid"},
+			{"file": "c.go", "line": 30, "status": "resolved", "rationale": "test added"},
+			{"file": "d.go", "line": 40, "status": "out_of_scope", "rationale": "file deleted"}
+		],
+		"summary": "ok"
+	}`
+	resp, err := ParseReviewResponse(raw)
+	if err != nil {
+		t.Fatalf("ParseReviewResponse: %v", err)
+	}
+	if len(resp.Findings) != 1 {
+		t.Errorf("findings = %d, want 1", len(resp.Findings))
+	}
+	if len(resp.PriorFindings) != 3 {
+		t.Fatalf("prior_findings = %d, want 3", len(resp.PriorFindings))
+	}
+	cases := []struct {
+		i     int
+		file  string
+		line  int
+		stat  FindingStatus
+		ratio string
+	}{
+		{0, "b.go", 20, StatusStillValid, ""},
+		{1, "c.go", 30, StatusResolved, "test added"},
+		{2, "d.go", 40, StatusOutOfScope, "file deleted"},
+	}
+	for _, c := range cases {
+		pf := resp.PriorFindings[c.i]
+		if pf.File != c.file || pf.Line != c.line {
+			t.Errorf("prior[%d] = %s:%d, want %s:%d", c.i, pf.File, pf.Line, c.file, c.line)
+		}
+		if pf.Status != c.stat {
+			t.Errorf("prior[%d].Status = %q, want %q", c.i, pf.Status, c.stat)
+		}
+		if pf.Rationale != c.ratio {
+			t.Errorf("prior[%d].Rationale = %q, want %q", c.i, pf.Rationale, c.ratio)
+		}
+	}
+}
+
+// TestParseReviewResponse_PriorFindingsAbsent covers the
+// backwards-compat path: a model that doesn't know about
+// `prior_findings` (or a first run) just doesn't include
+// the field. The parser must not fail; the orchestrator
+// handles a nil PriorFindings by treating all prior
+// findings as still_valid (the safe default — see
+// classifyPriorFindings).
+func TestParseReviewResponse_PriorFindingsAbsent(t *testing.T) {
+	raw := `{"findings": [], "summary": "lgtm"}`
+	resp, err := ParseReviewResponse(raw)
+	if err != nil {
+		t.Fatalf("ParseReviewResponse: %v", err)
+	}
+	if len(resp.PriorFindings) != 0 {
+		t.Errorf("PriorFindings = %d entries, want 0", len(resp.PriorFindings))
+	}
+	// Pin the nil-handling contract: a nil PriorFindings
+	// classifies all priors as still_valid. Tested in
+	// classifyPriorFindings (see prior_findings_test.go);
+	// this test is just the parse pin.
+}
+
 // TestApplyPolicy_NilPolicy_PassesThrough confirms the
 // orchestrator's nil-policy handling: agent verdicts stand.
 func TestApplyPolicy_NilPolicy_PassesThrough(t *testing.T) {
