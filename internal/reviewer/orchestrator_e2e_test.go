@@ -502,3 +502,103 @@ func extractMarker(body string) string {
 	}
 	return body[:end]
 }
+
+// TestOrchestrator_EndToEnd_ProseWrappedLLM is the
+// end-to-end regression test for the 2026-10-07
+// production failure: a smaller local model
+// (qwen2.5-coder:7b via Ollama) emitted ~3000 bytes of
+// inline reasoning prose BEFORE the final JSON object.
+// The parse layer's path 3 fallback (extract the first
+// balanced { ... } object) recovers the JSON; the
+// orchestrator then continues as if the model had
+// behaved.
+//
+// Without the parse fallback this test would fail with
+// the same "orchestrator: parse: invalid character 'I'
+// looking for beginning of value" error that the
+// production log captured on 2026-10-07.
+func TestOrchestrator_EndToEnd_ProseWrappedLLM(t *testing.T) {
+	// First-run setup: no prior summary, no prior
+	// findings. Simpler than the prior-edit case; the
+	// point of the test is the parse layer, not the
+	// dedup/edit flow.
+	fake := &fakeGitLabClient{
+		mergeRequest: &gitlab.MergeRequest{
+			IID:          42,
+			Title:        "Test MR",
+			SHA:          "NEW",
+			SourceBranch: "feature",
+			TargetBranch: "main",
+			Author:       gitlab.User{Username: "alice"},
+			DiffRefs:     gitlab.DiffRefs{BaseSHA: "b", HeadSHA: "h", StartSHA: "s"},
+		},
+		changes: []gitlab.ChangeFile{
+			{NewPath: "new.go", Diff: "@@ ... @@\n+new line"},
+		},
+		discussions: nil,
+	}
+
+	// LLM response shaped like the production failure:
+	// ~3000 bytes of inline reasoning prose (model
+	// emulates chain-of-thought), followed by a valid
+	// JSON object. The prose must NOT trip the JSON
+	// parser; the orchestrator must extract the JSON
+	// from the surrounding text and continue.
+	llmResp := `I'll start by reading the diff against the contract. Here's my analysis.
+
+**Findings:**
+- The new file is missing a test.
+
+Let me verify my line-number mapping before emitting the JSON.
+
+{
+  "findings": [
+    {"file": "new.go", "line": 5, "severity": "warning", "category": "test", "body": "Missing test", "suggestion": ""}
+  ],
+  "summary": "Clean run with one nit."
+}`
+
+	o, err := New(Config{
+		GitLab: fake,
+		Runner: &dummyRunner{resp: llmResp},
+		Logger: silentLogger(),
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	res, err := o.Run(context.Background(), "group/project", 42)
+	if err != nil {
+		t.Fatalf("Run: %v (the prose-wrapped LLM response was not recovered; this is the production bug)", err)
+	}
+	if res == nil {
+		t.Fatal("Run returned nil result")
+	}
+
+	// The review should have completed: 1 finding posted,
+	// 1 summary posted, no resolves (no prior).
+	if len(fake.postDiscussionCalls) != 1 {
+		t.Errorf("expected 1 PostDiscussion call; got %d (prose wrap may have blocked parse)", len(fake.postDiscussionCalls))
+	}
+	if len(fake.postSummaryCalls) != 1 {
+		t.Errorf("expected 1 PostSummary call; got %d", len(fake.postSummaryCalls))
+	}
+	if len(fake.resolveCalls) != 0 {
+		t.Errorf("expected 0 ResolveDiscussion calls; got %d", len(fake.resolveCalls))
+	}
+
+	// The summary body should reflect what the LLM
+	// emitted inside the JSON, not the prose.
+	posted := fake.postSummaryCalls[0]
+	if !strings.Contains(posted.body, "Clean run with one nit.") {
+		t.Errorf("summary body missing LLM's summary text; body:\n%s", posted.body)
+	}
+	if !strings.Contains(posted.body, "Missing test") {
+		t.Errorf("summary body missing finding body; body:\n%s", posted.body)
+	}
+	// And the body should NOT include the prose — the
+	// parser extracts only the JSON substring.
+	if strings.Contains(posted.body, "I'll start by reading") {
+		t.Errorf("summary body contains prose (extractor failed to slice to JSON only); body:\n%s", posted.body)
+	}
+}

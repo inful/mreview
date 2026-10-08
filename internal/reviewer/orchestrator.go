@@ -26,7 +26,6 @@ package reviewer
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -737,50 +736,16 @@ func toPolicyFindings(in []Finding) []policy.Finding {
 	return out
 }
 
-// ParseReviewResponse extracts a ReviewResponse from the
-// agent's raw text reply. Same layered strategy as the old
-// internal/llm/parse.go (raw → fenced → loose bracket →
-// streaming) but lives here because the package owns the
-// Finding / ReviewResponse types now.
-//
-// For brevity in this migration, only the raw + fenced
-// strategies are implemented here; the streaming fallback
-// can land in a follow-up if local models still produce
-// truncated output.
-func ParseReviewResponse(raw string) (ReviewResponse, error) {
-	trimmed := strings.TrimSpace(raw)
-	if trimmed == "" {
-		return ReviewResponse{}, errors.New("parse: empty response")
-	}
-	// Strip a single fence pair if present.
-	body := trimmed
-	if strings.HasPrefix(body, "```") {
-		body = stripFences(body)
-	}
-	var resp ReviewResponse
-	if err := json.Unmarshal([]byte(body), &resp); err != nil {
-		return ReviewResponse{}, fmt.Errorf("parse: %w", err)
-	}
-	return resp, nil
-}
-
-// stripFences removes the outer ```...``` (or ```json ...```)
-// wrapper if the response starts and ends with one. Doesn't
-// try to be clever — it just trims the first and last lines
-// when they look like fences. An unclosed fence (open with
-// no close) is left intact so the JSON parser can fail
-// informatively.
-func stripFences(s string) string {
-	lines := strings.Split(s, "\n")
-	if len(lines) < 2 || !strings.HasPrefix(lines[0], "```") {
-		return s
-	}
-	last := lines[len(lines)-1]
-	if !strings.HasPrefix(last, "```") {
-		return s
-	}
-	return strings.Join(lines[1:len(lines)-1], "\n")
-}
+// ParseReviewResponse and the JSON-extraction helpers
+// (stripFences, extractFirstJSON) live in parse.go. The
+// parse layer keeps three fallback paths in order:
+// (1) whole body is JSON, (2) body wrapped in a single
+// ```json ... ``` fence, (3) the first balanced { ... }
+// object embedded in reasoning prose. Path 3 is the
+// safety net for the 2026-10-07 production log: smaller
+// local models (qwen2.5-coder:7b) emit inline reasoning
+// before the final JSON, and the canonical "no prose"
+// system prompt rule doesn't reliably suppress that.
 
 // changeFileSource wraps gitlab.ChangeFile to satisfy
 // diff.Source. The wrapper lives here (not in the gitlab
