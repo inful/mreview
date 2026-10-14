@@ -2,13 +2,19 @@ package reviewer
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"strconv"
 	"strings"
 	"sync"
 	"testing"
 
+	"github.com/inful/decide"
+
+	"github.com/inful/mreview/internal/decision"
 	"github.com/inful/mreview/internal/gitlab"
 )
 
@@ -601,4 +607,226 @@ Let me verify my line-number mapping before emitting the JSON.
 	if strings.Contains(posted.body, "I'll start by reading") {
 		t.Errorf("summary body contains prose (extractor failed to slice to JSON only); body:\n%s", posted.body)
 	}
+}
+
+// TestOrchestrator_EndToEnd_DecisionAPILogged is the
+// spike wiring test: when Config.Decision is set, the
+// orchestrator calls the decision API for each prior
+// finding and logs the verdict. The LLM verdict is still
+// canonical — this test asserts the decision API was
+// called and the verdicts reached the log, not that
+// the verdicts changed the resolve/keep behaviour.
+//
+// The decision API is mocked with an httptest server
+// that returns a canned response per prior. The test
+// asserts on the captured request shapes (state body
+// carries the prior's file:line + body; the question
+// is the expected "choice" with three criteria) and
+// on the orchestrator's per-prior log line.
+func TestOrchestrator_EndToEnd_DecisionAPILogged(t *testing.T) {
+	// Capture the decision API requests so we can
+	// assert on the request shape.
+	type capturedRequest struct {
+		stateBody string
+		questions map[string]decide.Question
+	}
+	var (
+		mu       sync.Mutex
+		captured []capturedRequest
+	)
+	decisionSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req decide.Request
+		body, _ := io.ReadAll(r.Body)
+		if err := json.Unmarshal(body, &req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		mu.Lock()
+		captured = append(captured, capturedRequest{
+			stateBody: req.State.Body,
+			questions: req.Questions,
+		})
+		mu.Unlock()
+		// Return a canned "still_valid" verdict with
+		// high confidence. The orchestrator should
+		// log this at debug level; nothing else.
+		resp := decide.Response{
+			Model: "laya-rl-agent",
+			Answers: map[string]decide.Answer{
+				"status": {
+					Type:             "choice",
+					Choice:           "still_valid",
+					Probabilities:    map[string]float64{"still_valid": 0.95, "resolved": 0.03, "out_of_scope": 0.02},
+					Confidence:       0.95,
+					AnswerConfidence: 0.95,
+					Action:           decide.Action{ActProbability: 1.0},
+				},
+			},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	t.Cleanup(decisionSrv.Close)
+
+	// Build the orchestrator's normal flow: prior summary
+	// + 2 prior inline findings, LLM says "still valid /
+	// resolved" for each. The decision API says "still
+	// valid" for everything (the LLM's verdict wins).
+	const priorSummaryNoteID = int64(7000)
+	priorSummary := gitlab.Discussion{
+		ID: "d-summary",
+		Notes: []gitlab.Note{{
+			ID:     priorSummaryNoteID,
+			Body:   "<!-- mreview:commit=OLD findings=d-prior-1,d-prior-2 -->\n# mreview summary",
+			Author: gitlab.User{Username: "mreview-bot"},
+		}},
+	}
+	priorFinding1 := gitlab.Discussion{
+		ID: "d-prior-1",
+		Notes: []gitlab.Note{{
+			ID:       7001,
+			Body:     "Prior finding 1 (LLM said resolved, decision API said still valid).",
+			Author:   gitlab.User{Username: "mreview-bot"},
+			Position: &gitlab.NotePosition{NewPath: "old.go", NewLine: 10},
+		}},
+	}
+	priorFinding2 := gitlab.Discussion{
+		ID: "d-prior-2",
+		Notes: []gitlab.Note{{
+			ID:       7002,
+			Body:     "Prior finding 2 (LLM said still_valid, decision API said still valid).",
+			Author:   gitlab.User{Username: "mreview-bot"},
+			Position: &gitlab.NotePosition{NewPath: "old.go", NewLine: 20},
+		}},
+	}
+	fake := &fakeGitLabClient{
+		mergeRequest: &gitlab.MergeRequest{
+			IID:          42,
+			Title:        "Test MR",
+			SHA:          "NEW",
+			SourceBranch: "feature",
+			TargetBranch: "main",
+			Author:       gitlab.User{Username: "alice"},
+			DiffRefs:     gitlab.DiffRefs{BaseSHA: "b", HeadSHA: "h", StartSHA: "s"},
+		},
+		changes: []gitlab.ChangeFile{
+			{NewPath: "new.go", Diff: "@@ ... @@\n+new line"},
+		},
+		discussions: []gitlab.Discussion{priorSummary, priorFinding1, priorFinding2},
+	}
+	llmResp := `{
+		"findings": [],
+		"prior_findings": [
+			{"file": "old.go", "line": 10, "status": "resolved", "rationale": "the new code fixed this"},
+			{"file": "old.go", "line": 20, "status": "still_valid"}
+		],
+		"summary": "Mostly clean."
+	}`
+
+	// Construct the decision runner pointing at the
+	// httptest server. This is the same wiring
+	// buildDecisionRunner does in clients.go.
+	decisionClient := decide.New(decisionSrv.URL)
+	decisionRunner := decision.NewAdapter(decisionClient, silentLogger())
+
+	o, err := New(Config{
+		GitLab:   fake,
+		Runner:   &dummyRunner{resp: llmResp},
+		Logger:   silentLogger(),
+		Decision: decisionRunner,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if _, err := o.Run(context.Background(), "group/project", 42); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	// Assert: the decision API was called exactly once
+	// per prior finding (we have 2 priors).
+	mu.Lock()
+	defer mu.Unlock()
+	if len(captured) != 2 {
+		t.Fatalf("expected 2 decision API calls (one per prior); got %d", len(captured))
+	}
+
+	// Assert: the request shape is right. The state
+	// body carries the prior's file:line + body; the
+	// question is a "choice" with the three expected
+	// criteria.
+	for i, c := range captured {
+		// The exact file:line / body is per-prior;
+		// we just check the shape.
+		if !strings.Contains(c.stateBody, "old.go:") {
+			t.Errorf("call %d: state body missing file:line; got %q", i, c.stateBody)
+		}
+		if !strings.Contains(c.stateBody, "Prior finding:") {
+			t.Errorf("call %d: state body missing 'Prior finding:' header; got %q", i, c.stateBody)
+		}
+		if !strings.Contains(c.stateBody, "Prior finding ") {
+			t.Errorf("call %d: state body missing prior body; got %q", i, c.stateBody)
+		}
+		q, ok := c.questions["status"]
+		if !ok {
+			t.Errorf("call %d: missing 'status' question", i)
+			continue
+		}
+		if q.Type != "choice" {
+			t.Errorf("call %d: status question type = %q, want choice", i, q.Type)
+		}
+		for _, want := range []string{"still_valid", "resolved", "out_of_scope"} {
+			if _, ok := q.Criteria[want]; !ok {
+				t.Errorf("call %d: status criteria missing %q; got %+v", i, want, q.Criteria)
+			}
+		}
+	}
+
+	// Assert: the LLM verdict is still canonical.
+	// d-prior-1 was LLM-resolved; the decision API
+	// said still_valid, but the LLM's verdict wins,
+	// so the orchestrator should have called
+	// ResolveDiscussion on d-prior-1.
+	if len(fake.resolveCalls) != 1 || fake.resolveCalls[0] != "d-prior-1" {
+		t.Errorf("expected resolve of d-prior-1 (LLM verdict); got %v", fake.resolveCalls)
+	}
+}
+
+// TestOrchestrator_EndToEnd_NoDecisionAPIByDefault
+// confirms that the existing behaviour is unchanged
+// when no --decision-api is configured. Config.Decision
+// is nil; the orchestrator's prior-processing loop
+// should skip the decision API block entirely.
+func TestOrchestrator_EndToEnd_NoDecisionAPIByDefault(t *testing.T) {
+	fake := &fakeGitLabClient{
+		mergeRequest: &gitlab.MergeRequest{
+			IID:          42,
+			Title:        "Test MR",
+			SHA:          "NEW",
+			SourceBranch: "feature",
+			TargetBranch: "main",
+			Author:       gitlab.User{Username: "alice"},
+			DiffRefs:     gitlab.DiffRefs{BaseSHA: "b", HeadSHA: "h", StartSHA: "s"},
+		},
+		changes:     []gitlab.ChangeFile{{NewPath: "new.go", Diff: "@@ ... @@\n+x"}},
+		discussions: nil, // no prior → decision API wouldn't be called anyway
+	}
+	llmResp := `{"findings": [], "summary": "lgtm"}`
+
+	o, err := New(Config{
+		GitLab: fake,
+		Runner: &dummyRunner{resp: llmResp},
+		Logger: silentLogger(),
+		// Decision: nil — the spike must be a strict
+		// opt-in. Without --decision-api, the
+		// orchestrator behaves exactly as before.
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if _, err := o.Run(context.Background(), "group/project", 42); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	// If the orchestrator tried to call a nil Decision
+	// runner, it would panic. The fact that Run
+	// returned without panicking is the assertion.
 }

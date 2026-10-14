@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/inful/decide"
 	"github.com/sausheong/harness/llm"
 	"github.com/sausheong/harness/runtime"
 	"github.com/sausheong/harness/session"
@@ -14,6 +15,7 @@ import (
 	"github.com/sausheong/harness/tools/mcp"
 
 	"github.com/inful/mreview/internal/ci/artifact"
+	"github.com/inful/mreview/internal/decision"
 	"github.com/inful/mreview/internal/gitlab"
 	"github.com/inful/mreview/internal/policy"
 	"github.com/inful/mreview/internal/prompts"
@@ -103,6 +105,20 @@ type clientDeps struct {
 	// orchestrator threads into the prompt. Nil = no
 	// artifacts configured.
 	Artifacts *artifact.Set
+
+	// DecisionAPI is the base URL of the inful/decide
+	// service (e.g. "http://localhost:8080"). When set,
+	// the orchestrator calls the decision API for each
+	// prior finding and logs the verdict at debug level;
+	// the LLM verdict is still canonical for the actual
+	// resolve/keep behaviour. The spike wiring — see
+	// internal/decision/adapter.go for the contract. Empty
+	// = no decision API configured (the existing LLM-only
+	// path).
+	DecisionAPI string
+	// DecisionToken is the bearer token for the decision
+	// API. Sent as the Authorization header.
+	DecisionToken string
 
 	// DebugLLM forwards --debug-llm. When true, the
 	// orchestrator prints the raw LLM response to stderr
@@ -197,6 +213,7 @@ func buildReviewer(ctx context.Context, deps clientDeps) (reviewerInterface, err
 		Artifacts:   deps.Artifacts,
 		DebugLLM:    deps.DebugLLM,
 		Logger:      deps.Logger,
+		Decision:    buildDecisionRunner(deps),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("build orchestrator: %w", err)
@@ -372,6 +389,27 @@ func spawnSkillsMCPServerConfig(deps clientDeps) (mcpServerConfig, error) {
 // library re-organises its packages in a future release.
 // Today it's just mcp.ServerConfig.
 type mcpServerConfig = mcp.ServerConfig
+
+// buildDecisionRunner constructs the reviewer's
+// DecisionRunner from the CLI flags, or returns nil
+// when the operator didn't set --decision-api. The
+// decision API is a SPIKE — the orchestrator's
+// Config.Decision field is nil by default, the
+// existing LLM-only path is unchanged, and the
+// adapter is constructed only when the operator
+// opts in via the CLI flag.
+//
+// The token is sent as a Bearer credential on every
+// request; the decide client handles retries with
+// exponential backoff and the standard 429/5xx
+// retry policy.
+func buildDecisionRunner(deps clientDeps) reviewer.DecisionRunner {
+	if deps.DecisionAPI == "" {
+		return nil
+	}
+	client := decide.New(deps.DecisionAPI, decide.WithToken(deps.DecisionToken))
+	return decision.NewAdapter(client, deps.Logger)
+}
 
 // ParseCommentMode kept for the ReviewCmd enum binding; the
 // review subcommand no longer uses comment-mode (PR #3 wires

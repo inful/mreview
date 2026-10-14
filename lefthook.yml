@@ -1,18 +1,16 @@
-# lefthook configuration
-# See https://github.com/evilmartians/lefthook
+# yaml-language-server: $schema=https://lefthook.dev/schema.json
 #
-# Install: lefthook install
-# Run manually: lefthook run pre-commit
+# Imports the shared lefthook configuration from github.com/inful/lefthooks.
+# Pin `ref` to a tag for reproducible builds.
 #
-# Mirrors repo-mr-file's lefthook: parallel lint + race-enabled test on
-# every commit. Local gate; CI runs the same gates on every push.
+# Hook behavior is defined in https://github.com/inful/lefthooks and
+# self-gates per-consumer via glob/skip conditions — no per-repo overrides
+# needed for the standard Go / Markdown / sqlc checks.
 
-pre-commit:
-  parallel: true
-  commands:
-    lint:
-      glob: "*.go"
-      run: golangci-lint run
-    test:
-      glob: "*.go"
-      run: go test -race -count=1 ./...
+min_version: 2.1.0
+
+remotes:
+  - git_url: git@github.com:inful/lefthooks.git
+    ref: v0.1.1
+    configs:
+      - lefthook.yml

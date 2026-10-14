@@ -214,6 +214,20 @@ type ReviewCmd struct {
 	SkillsRef      string `name:"skills-ref"       env:"MREVIEW_SKILLS_REF"       help:"Branch / tag / SHA to read the skills from. Default 'main'."`
 	SkillsTokenEnv string `name:"skills-token-env" env:"MREVIEW_SKILLS_TOKEN_ENV" help:"NAME of the env var carrying the PAT for the skills repo. Default reuses --gitlab-token-env (GITLAB_TOKEN)."`
 
+	// Decision API (spike — opt-in). When --decision-api is
+	// set, the orchestrator calls the inful/decide service
+	// for each prior finding and logs the verdict at debug
+	// level. The LLM verdict is still canonical for the
+	// actual resolve/keep behaviour; the decision API's
+	// verdict is logged for an agreement study. Empty =
+	// no decision API (the existing LLM-only path). The
+	// follow-up: when agreement crosses a threshold, the
+	// decision API's verdict can replace the LLM's for
+	// the resolve/keep decision; today's wiring is
+	// observability-only.
+	DecisionAPI   string `name:"decision-api"   env:"MREVIEW_DECISION_API"   help:"Base URL of the inful/decide service (e.g. http://localhost:8080). Empty disables the decision API."`
+	DecisionToken string `name:"decision-token" env:"MREVIEW_DECISION_TOKEN" help:"Bearer token for the decision API. Sent as the Authorization header."`
+
 	// Verbose is intentionally NOT declared here — it lives on
 	// the parent CLI struct so it's accepted globally.
 }
@@ -474,6 +488,8 @@ func loadReviewer(parentCtx context.Context, c *ReviewCmd, prep *preparedReview,
 		SkillsDir:        c.SkillsDir,
 		SkillsRef:        c.SkillsRef,
 		SkillsTokenEnv:   c.SkillsTokenEnv,
+		DecisionAPI:      c.DecisionAPI,
+		DecisionToken:    c.DecisionToken,
 		Artifacts:        prep.artifactSet,
 		Logger:           logger,
 	})

@@ -4,7 +4,24 @@ import (
 	"context"
 
 	"github.com/sausheong/harness/runtime"
+
+	"github.com/inful/mreview/internal/decision"
 )
+
+// DecisionRunner is the interface the orchestrator uses
+// to call a per-prior-finding decision API. The production
+// adapter (internal/decision.Adapter) wraps
+// github.com/inful/decide.Client; tests substitute a
+// fake via the e2e harness.
+//
+// The interface is defined here (in the package that
+// declares Config.Decision) rather than re-exported from
+// internal/decision so the reviewer's Config struct has
+// a self-contained type. The internal/decision package
+// satisfies this interface implicitly — the production
+// wiring passes *decision.Adapter where DecisionRunner
+// is expected.
+type DecisionRunner = decision.Runner
 
 // harnessRunner is the production Runner — wraps
 // harness's runtime.Runtime and dispatches RunSync calls to

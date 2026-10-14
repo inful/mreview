@@ -31,8 +31,10 @@ import (
 	"log/slog"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/inful/mreview/internal/ci/artifact"
+	"github.com/inful/mreview/internal/decision"
 	"github.com/inful/mreview/internal/diff"
 	"github.com/inful/mreview/internal/git"
 	"github.com/inful/mreview/internal/gitlab"
@@ -101,6 +103,18 @@ type Config struct {
 	Policy      *policy.Policy
 	BotUsername string
 	DryRun      bool
+
+	// Decision, when set, is called once per prior finding
+	// AFTER the LLM verdict is computed. The decision API's
+	// verdict is logged at debug level for an agreement
+	// study; the LLM verdict is still canonical for the
+	// actual resolve/keep behaviour. The spike wiring:
+	// see internal/decision/adapter.go for the contract
+	// and the follow-up plan (when agreement crosses a
+	// threshold, default-enable the override; until then
+	// this field is opt-in via the --decision-api CLI
+	// flag). nil = no decision API configured.
+	Decision decision.Runner
 
 	// Artifacts carries the CI artifacts the central pipeline
 	// produced before mreview ran (build log, test results,
@@ -530,6 +544,42 @@ func (o *Orchestrator) Run(ctx context.Context, project any, iid int, action ...
 	// shouldn't trigger an auto-resolve the operator didn't
 	// ask for).
 	priorActions := classifyPriorFindings(resp.PriorFindings, priorFindings, logger)
+
+	// Decision-API agreement log. When Config.Decision is
+	// set, call it for each prior finding and log the
+	// verdict at debug level. The LLM verdict is still
+	// canonical — this is observability for the spike
+	// agreement study, not a behaviour change. The follow-up
+	// will: (a) collect these logs into agreement stats, (b)
+	// when agreement is high, default-enable the override
+	// path, (c) add a confidence threshold below which we
+	// fall back to the LLM verdict. Today: log only.
+	if o.cfg.Decision != nil {
+		for _, pf := range priorFindings {
+			ctxCall, cancel := context.WithTimeout(ctx, 10*time.Second)
+			dec, derr := o.cfg.Decision.ClassifyPrior(ctxCall, decision.PriorInput{
+				File:      pf.File,
+				Line:      pf.Line,
+				PriorBody: pf.Body,
+			})
+			cancel()
+			if derr != nil {
+				logger.Debug("decision API classify failed; using LLM verdict",
+					"file", pf.File,
+					"line", pf.Line,
+					"err", derr.Error(),
+				)
+				continue
+			}
+			logger.Debug("decision API verdict",
+				"file", pf.File,
+				"line", pf.Line,
+				"decision_status", string(dec.Status),
+				"decision_confidence", dec.Confidence,
+				"decision_probs", fmt.Sprintf("%v", dec.Probs),
+			)
+		}
+	}
 
 	// Auto-resolve the prior findings the LLM marked
 	// resolved or out_of_scope. Best-effort: a 404 (the

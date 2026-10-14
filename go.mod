@@ -1,6 +1,6 @@
 module github.com/inful/mreview
 
-go 1.26.7
+go 1.26.8
 
 require (
 	github.com/alecthomas/kong v1.16.1
@@ -26,6 +26,7 @@ require (
 	github.com/gorilla/websocket v1.5.3 // indirect
 	github.com/hashicorp/go-cleanhttp v0.5.2 // indirect
 	github.com/hashicorp/go-retryablehttp v0.7.8 // indirect
+	github.com/inful/decide v0.0.0-20261008064855-f78fd7ad59b9
 	github.com/sashabaranov/go-openai v1.41.2 // indirect
 	github.com/segmentio/asm v1.1.3 // indirect
 	github.com/segmentio/encoding v0.5.4 // indirect
